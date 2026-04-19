@@ -33,6 +33,8 @@ cvar_t *ultron_bot_no_strafe       = nullptr;  // 1 = don't auto-strafe during c
 cvar_t *ultron_bot_debug           = nullptr;  // 1 = emit verbose per-decision logs
 cvar_t *ultron_bot_wander          = nullptr;  // 1 = explore map when no enemy
 cvar_t *ultron_bot_wander_probe    = nullptr;  // forward-traceline probe distance for wall avoidance
+cvar_t *ultron_bot_turn_speed      = nullptr;  // degrees/sec max view rotation; below-pro = ~540
+cvar_t *ultron_bot_aim_jitter      = nullptr;  // tiny random noise added to aim each frame (deg)
 
 static edict_t *g_Ultron_human = nullptr;
 
@@ -55,6 +57,13 @@ static gtime_t g_wander_yaw_until = 0_ms;
 static vec3_t  g_last_pos         = {};
 static gtime_t g_last_pos_check   = 0_ms;
 static gtime_t g_stuck_since      = 0_ms;
+
+// Smoothed aim state. delta_angles is rate-limited so the view doesn't
+// teleport to the target (which reads as infinite sensitivity). Initialized
+// from the player's actual view on first bot tick so there's no pop.
+static float g_cur_yaw   = 0.0f;
+static float g_cur_pitch = 0.0f;
+static bool  g_aim_init  = false;
 
 // Per-human memory of the last-seen enemy position.
 struct bot_memory_t {
@@ -89,6 +98,8 @@ void Ultron_OnClientDisconnect(edict_t *ent) {
     if (ent == g_Ultron_human) {
         g_Ultron_human = nullptr;
         g_mem = {};
+        g_aim_init = false;
+        g_wander_yaw_until = 0_ms;
         gi.Com_Print("[ultron] human disconnected; identity cleared\n");
     }
     // Also drop any target we'd memorized pointing at a disconnecting edict.
@@ -135,6 +146,8 @@ void Ultron_Bot_Init() {
     ultron_bot_debug       = gi.cvar("ultron_bot_debug",       "0",   CVAR_NOFLAGS);
     ultron_bot_wander      = gi.cvar("ultron_bot_wander",      "1",   CVAR_NOFLAGS);
     ultron_bot_wander_probe= gi.cvar("ultron_bot_wander_probe","128", CVAR_NOFLAGS);
+    ultron_bot_turn_speed  = gi.cvar("ultron_bot_turn_speed",  "540", CVAR_NOFLAGS);
+    ultron_bot_aim_jitter  = gi.cvar("ultron_bot_aim_jitter",  "0.3", CVAR_NOFLAGS);
     g_Ultron_human  = nullptr;
     g_mem          = {};
     g_eval_start   = 0_ms;
@@ -146,6 +159,8 @@ void Ultron_Bot_Init() {
     g_last_pos = {};
     g_last_pos_check = 0_ms;
     g_stuck_since = 0_ms;
+    g_cur_yaw = g_cur_pitch = 0.0f;
+    g_aim_init = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,23 +200,57 @@ static vec3_t EyePos(edict_t *ent) {
     return p;
 }
 
-// Force self's view to look at 'point'. Mirrors Edict_ForceLookAtPoint in
-// bots/bot_exports.cpp but keeps the player's cmd_angles (so the engine-side
-// input accumulator stays sane).
-static vec3_t AimAtPoint(edict_t *self, const vec3_t &point) {
+// Shortest-path signed delta from a -> b in degrees, result in [-180, 180].
+static float AngleShortestDelta(float a, float b) {
+    float d = b - a;
+    while (d >  180.0f) d -= 360.0f;
+    while (d < -180.0f) d += 360.0f;
+    return d;
+}
+
+// Rate-limited aim. Rotates g_cur_yaw / g_cur_pitch toward (desired_yaw,
+// desired_pitch) at most ultron_bot_turn_speed degrees per frame-second,
+// then commits the smoothed angles to the client's viewangles + delta_angles.
+// frametime_s is taken from ucmd->msec so smoothing is correct at any client
+// tick rate.
+static void AimSmooth(edict_t *self, float desired_yaw, float desired_pitch, float frametime_s) {
+    if (!g_aim_init) {
+        g_cur_yaw   = self->client->v_angle[YAW];
+        g_cur_pitch = self->client->v_angle[PITCH];
+        g_aim_init  = true;
+    }
+
+    float turn_speed = CvarF(ultron_bot_turn_speed, 540.0f);
+    float max_step   = turn_speed * std::max(frametime_s, 0.001f);
+
+    float dyaw   = AngleShortestDelta(g_cur_yaw,   desired_yaw);
+    float dpitch = AngleShortestDelta(g_cur_pitch, desired_pitch);
+    dyaw   = std::clamp(dyaw,   -max_step, max_step);
+    dpitch = std::clamp(dpitch, -max_step, max_step);
+    g_cur_yaw   = anglemod(g_cur_yaw + dyaw);
+    g_cur_pitch = std::clamp(g_cur_pitch + dpitch, -89.0f, 89.0f);
+
+    // Tiny hand-tremor jitter so the aim isn't perfectly rigid.
+    float jitter = CvarF(ultron_bot_aim_jitter, 0.3f);
+    float yaw_out   = g_cur_yaw   + (jitter > 0.0f ? crandom() * jitter : 0.0f);
+    float pitch_out = g_cur_pitch + (jitter > 0.0f ? crandom() * jitter : 0.0f);
+    pitch_out = std::clamp(pitch_out, -89.0f, 89.0f);
+
+    vec3_t cur = { pitch_out, yaw_out, 0.0f };
+    self->client->ps.pmove.delta_angles = cur - self->client->resp.cmd_angles;
+    self->client->ps.viewangles = cur;
+    self->client->v_angle       = cur;
+    self->s.angles              = { 0.0f, yaw_out, 0.0f };
+}
+
+// Aim at a point in world space. Returns (pitch, yaw, 0) of the ideal look
+// direction; caller uses this for downstream fire-cone checks.
+static vec3_t AimAtPoint(edict_t *self, const vec3_t &point, float frametime_s) {
     vec3_t eye   = EyePos(self);
     vec3_t ideal = (point - eye).normalized();
     vec3_t desired = vectoangles(ideal);
     if (desired[PITCH] < -180.0f) desired[PITCH] = anglemod(desired[PITCH] + 360.0f);
-
-    // viewangles = cmd.angles + delta_angles (see p_move.cpp:1530).
-    // Drive delta_angles so that, for whatever cmd.angles the engine passes in
-    // next frame, the viewangles resolve to 'desired'.
-    self->client->ps.pmove.delta_angles = desired - self->client->resp.cmd_angles;
-    // Snap the rendered/logical angles so the camera matches immediately.
-    self->client->ps.viewangles = desired;
-    self->client->v_angle       = desired;
-    self->s.angles              = { 0.0f, desired[YAW], 0.0f };
+    AimSmooth(self, desired[YAW], desired[PITCH], frametime_s);
     return desired;
 }
 
@@ -266,19 +315,9 @@ static bool AimWithinCone(edict_t *self, const vec3_t &target_point) {
 // ---------------------------------------------------------------------------
 // Explore / wander
 
-// Aim the camera at 'yaw' degrees (ground plane). Used by both combat and
-// wander. Mirrors the Edict_ForceLookAtPoint pattern.
-static void SetAimYawPitch(edict_t *self, float yaw, float pitch) {
-    vec3_t desired = { pitch, yaw, 0.0f };
-    self->client->ps.pmove.delta_angles = desired - self->client->resp.cmd_angles;
-    self->client->ps.viewangles = desired;
-    self->client->v_angle       = desired;
-    self->s.angles              = { 0.0f, yaw, 0.0f };
-}
-
 // Simple wander: pick a yaw, walk forward, avoid walls, rotate on stuck.
 // Runs when no target is known. Exits with ucmd filled for this frame.
-static void DriveWander(edict_t *self, usercmd_t *ucmd) {
+static void DriveWander(edict_t *self, usercmd_t *ucmd, float frametime_s) {
     const float speed = CvarF(ultron_bot_move_speed, DEFAULT_MOVE_SPEED);
     const float probe = CvarF(ultron_bot_wander_probe, 128.0f);
 
@@ -333,8 +372,8 @@ static void DriveWander(edict_t *self, usercmd_t *ucmd) {
         g_wander_yaw_until = level.time + gtime_t::from_ms(1200 + (int64_t)frandom(2800.0f));
     }
 
-    // Aim where we're walking (with a slight downward tilt so we don't stare at the ceiling).
-    SetAimYawPitch(self, g_wander_yaw, 0.0f);
+    // Aim where we're walking — smoothed so the camera doesn't snap.
+    AimSmooth(self, g_wander_yaw, 0.0f, frametime_s);
 
     // Forward at full speed; no strafe during exploration.
     ucmd->forwardmove = speed;
@@ -352,6 +391,11 @@ static void DriveWander(edict_t *self, usercmd_t *ucmd) {
 void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     if (!ultron_play_self || !ultron_play_self->integer) return;
     if (!self || !self->client) return;
+
+    // Capture the engine-provided frametime BEFORE we overwrite ucmd, so the
+    // smoothed-aim rate limit is correct at any client tick rate.
+    float frametime_s = (float)ucmd->msec / 1000.0f;
+    if (frametime_s <= 0.0f) frametime_s = 0.025f;  // 40Hz server fallback
 
     // ALWAYS zero the human's incoming input first — no keyboard or mouse from
     // the user ever reaches pmove / weapon fire / view angles while play_self
@@ -438,7 +482,7 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
         // No target, no memory — wander the map (was: stand still). Gated on
         // ultron_bot_wander so a tuning pass can disable for A/B.
         if (CvarI(ultron_bot_wander, 1)) {
-            DriveWander(self, ucmd);
+            DriveWander(self, ucmd, frametime_s);
         }
         return;
     }
@@ -448,7 +492,7 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     g_stuck_since      = 0_ms;
     if (target) g_target_ticks++;
 
-    vec3_t desired = AimAtPoint(self, aim_point);
+    vec3_t desired = AimAtPoint(self, aim_point, frametime_s);
 
     // Walk toward visible target; if only remembered, also walk toward last-seen.
     DriveMovement(self, ucmd, aim_point, desired[YAW]);
