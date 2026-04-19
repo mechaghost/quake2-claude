@@ -146,6 +146,7 @@ static void LoadBrain(const char *mapname);
 static void BrainNoteItemSight(edict_t *e);
 static void BrainNoteDeath();
 static void BrainTick(edict_t *self);
+static void Ultron_ClearNavState();  // defined after g_plan/g_loot_target
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -180,6 +181,7 @@ void Ultron_OnClientDisconnect(edict_t *ent) {
         g_aim_init = false;
         g_wander_yaw_until = 0_ms;
         g_counted_this_game = false;  // next bind on new map starts a new game count
+        Ultron_ClearNavState();
         gi.Com_Print("[ultron] human disconnected; identity cleared\n");
     }
     // Also drop any target we'd memorized pointing at a disconnecting edict.
@@ -537,52 +539,81 @@ static void BrainNoteDeath() {
 // ---------------------------------------------------------------------------
 // Pathfinding via gi.GetPathToGoal
 
-// Cached plan so we don't re-query the engine each frame (cheap but not free).
+// Cached plan. Stores the full waypoint array and advances through it as
+// Ultron reaches each sub-goal — replans infrequently (every 3s or on
+// goal-drift). Keeps view + movement stable instead of thrashing on
+// per-frame replans.
 struct ultron_plan_t {
-    vec3_t  goal          = {};       // world-space end goal
-    vec3_t  next_waypoint = {};       // current sub-goal to walk toward
-    bool    has_plan      = false;
-    gtime_t replan_at     = 0_ms;
+    vec3_t                   goal           = {};
+    std::array<vec3_t, 256>  waypoints      = {};
+    int                      waypoint_count = 0;
+    int                      current_wp     = 0;
+    bool                     has_plan       = false;
+    gtime_t                  replan_at      = 0_ms;
 };
 static ultron_plan_t g_plan;
 
-// Replan the path to 'goal' if our cached plan is stale or if goal drifted.
-// Returns true if g_plan.next_waypoint is now usable for movement.
+constexpr float WAYPOINT_ARRIVE_DIST = 48.0f;   // advance when within this
+constexpr int64_t PLAN_TTL_MS         = 3000;    // replan every 3s
+constexpr float   GOAL_DRIFT_DIST    = 192.0f;  // or when goal moves this much
+
 static bool PlanTo(edict_t *self, const vec3_t &goal) {
-    const bool goal_moved = (goal - g_plan.goal).length() > 96.0f;
-    if (g_plan.has_plan && !goal_moved && level.time < g_plan.replan_at) {
-        return true;
+    const bool goal_moved = (goal - g_plan.goal).length() > GOAL_DRIFT_DIST;
+    const bool need_fresh = !g_plan.has_plan || goal_moved || level.time >= g_plan.replan_at;
+
+    if (need_fresh) {
+        PathRequest req{};
+        req.start = self->s.origin;
+        req.goal  = goal;
+        req.moveDist = 32.0f;
+        req.pathFlags = PathFlags::All;
+        req.nodeSearch.minHeight = 64.0f;
+        req.nodeSearch.maxHeight = 64.0f;
+        req.nodeSearch.radius    = 512.0f;
+        req.pathPoints.array = g_plan.waypoints.data();
+        req.pathPoints.count = (int64_t)g_plan.waypoints.size();
+
+        PathInfo info{};
+        if (!gi.GetPathToGoal(req, info) || info.numPathPoints <= 0) {
+            g_plan.has_plan = false;
+            g_plan.replan_at = level.time + 500_ms;
+            return false;
+        }
+        g_plan.waypoint_count = info.numPathPoints;
+        g_plan.current_wp     = 0;
+        g_plan.goal           = goal;
+        g_plan.has_plan       = true;
+        g_plan.replan_at      = level.time + gtime_t::from_ms(PLAN_TTL_MS);
     }
 
-    std::array<vec3_t, 256> points;
-    PathRequest req{};
-    req.start = self->s.origin;
-    req.goal  = goal;
-    req.moveDist = 32.0f;   // matches humanoid step granularity
-    req.pathFlags = PathFlags::All;
-    req.nodeSearch.minHeight = 64.0f;
-    req.nodeSearch.maxHeight = 64.0f;
-    req.nodeSearch.radius    = 512.0f;
-    req.pathPoints.array = points.data();
-    req.pathPoints.count = (int64_t)points.size();
-
-    PathInfo info{};
-    if (!gi.GetPathToGoal(req, info) || info.numPathPoints <= 0) {
-        g_plan.has_plan = false;
-        g_plan.replan_at = level.time + 500_ms;  // don't hammer on failure
-        return false;
+    // Advance through the path as we reach each waypoint. Leaves the
+    // "current" pointer on the first waypoint we still need to walk to.
+    while (g_plan.current_wp < g_plan.waypoint_count - 1) {
+        vec3_t wp = g_plan.waypoints[g_plan.current_wp];
+        vec3_t d  = wp - self->s.origin;
+        d[2] = 0.0f;
+        if (d.length() < WAYPOINT_ARRIVE_DIST) {
+            g_plan.current_wp++;
+        } else break;
     }
-
-    // Use firstMovePoint which the engine fills for the initial step. If
-    // that is zero, fall back to the first array entry.
-    vec3_t wp = info.firstMovePoint;
-    if (wp.length() < 1.0f) wp = points[0];
-
-    g_plan.goal          = goal;
-    g_plan.next_waypoint = wp;
-    g_plan.has_plan      = true;
-    g_plan.replan_at     = level.time + 500_ms;  // re-query twice a second
     return true;
+}
+
+// Accessor for MoveTowardGoal — returns the current sub-goal to walk toward.
+static vec3_t PlanCurrentWaypoint() {
+    if (!g_plan.has_plan || g_plan.waypoint_count == 0) return g_plan.goal;
+    int idx = std::min(g_plan.current_wp, g_plan.waypoint_count - 1);
+    return g_plan.waypoints[idx];
+}
+
+// Clear nav / loot state — called on disconnect. Forward-declared earlier
+// so Ultron_OnClientDisconnect (which lives above these statics) can call it.
+static edict_t *g_loot_target = nullptr;  // real definition; also used by State_Loot below
+static void Ultron_ClearNavState() {
+    g_plan.has_plan = false;
+    g_plan.waypoint_count = 0;
+    g_plan.current_wp = 0;
+    g_loot_target = nullptr;
 }
 
 // Straight-line movement toward a ground-plane goal, with no combat strafe
@@ -614,12 +645,19 @@ static void MoveTowardGoal(edict_t *self, usercmd_t *ucmd, const vec3_t &goal, f
     vec3_t walk_point = goal;
     vec3_t look_point = goal;
     if (PlanTo(self, goal)) {
-        walk_point = g_plan.next_waypoint;
+        walk_point = PlanCurrentWaypoint();
         float dist_to_wp = (walk_point - self->s.origin).length();
-        // If the waypoint is very close, aim at the final goal so our
-        // view is on "where we're going" rather than the step in front
-        // of our feet.
-        look_point = (dist_to_wp < 128.0f) ? goal : walk_point;
+        // If we're very close to the current waypoint, look past it — at
+        // the next waypoint if any, else the final goal. Keeps the view
+        // on "where we're headed" instead of snapping to underfoot.
+        if (dist_to_wp < 96.0f) {
+            int next_idx = std::min(g_plan.current_wp + 1, g_plan.waypoint_count - 1);
+            look_point = (g_plan.has_plan && g_plan.waypoint_count > 0)
+                         ? g_plan.waypoints[next_idx]
+                         : goal;
+        } else {
+            look_point = walk_point;
+        }
     }
     walk_point[2] += 16.0f;
     look_point[2] += 16.0f;
@@ -1141,10 +1179,25 @@ static void State_Heal(edict_t *self, usercmd_t *ucmd, float frametime_s) {
 // Loot state: walk straight at the highest-value nearby pickupable item.
 // Phase 3 will replace this walk-line with real pathfinding so we can
 // cross rooms rather than just grabbing whatever happens to be in LoS.
+// Stickiness for LOOT: once Ultron picks a target item, stay on it until
+// it's gone or we've reached it. Re-scanning every frame would oscillate
+// between two similarly-weighted items and thrash the pathing.
+// (g_loot_target is defined up near g_plan so ClearNavState can see it.)
+
+static bool LootTargetValid(edict_t *self, edict_t *e) {
+    if (!e) return false;
+    if (!ItemIsPickupable(self, e)) return false;
+    if (ItemWeight(self, e) <= 0.0f) return false;
+    if ((e->s.origin - self->s.origin).length() > 2000.0f) return false;
+    return true;
+}
+
 static void State_Loot(edict_t *self, usercmd_t *ucmd, float frametime_s) {
-    edict_t *pick = FindBestPickup(self, 1600.0f, false);
-    if (!pick) { DriveWander(self, ucmd, frametime_s); return; }
-    MoveTowardGoal(self, ucmd, pick->s.origin, frametime_s);
+    if (!LootTargetValid(self, g_loot_target)) {
+        g_loot_target = FindBestPickup(self, 1600.0f, false);
+    }
+    if (!g_loot_target) { DriveWander(self, ucmd, frametime_s); return; }
+    MoveTowardGoal(self, ucmd, g_loot_target->s.origin, frametime_s);
 }
 
 // Respawn / intermission button pulsers, extracted so dispatcher stays clean.
