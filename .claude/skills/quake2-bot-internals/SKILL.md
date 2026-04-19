@@ -159,13 +159,108 @@ Use via `+set ultron_bot_fire_cone 3` at launch, or from `eval.bat -Cvars @{ultr
 | SVF_BOT gate trap | `rerelease/bots/bot_exports.cpp` | line 17 |
 | Stock bot API | `rerelease/game.h` | game_import_t ~1989, game_export_t ~2138 |
 
-## Explicitly deferred (scope decisions made during MVP planning)
+## State machine (Phase 8, shipped)
 
-These are not implemented; when the user asks for them, do not assume they work:
+`Ultron_Bot_Command` dispatches through `DecideState()` → one of:
 
-- **Weapon switching** — use `ucmd->impulse` or `item->use` direct call, not `Bot_SetWeapon`.
-- **Pathfinding** — `gi.GetPathToGoal(PathRequest&, PathInfo&)` at `game.h:1995`. Preallocate a `std::array<vec3_t, 256>` (or 512 like `bots/bot_debug.cpp:30`); `request.moveDist` should be ~32 for humanoid granularity. Check `PathReturnCode::NoNavAvailable` for maps without nav.
-- **Item memory** — scan `g_edicts` for `ent->item && (ent->svflags & SVF_RESPAWNING)`; respawn time = `ent->nextthink - level.time`.
-- **Hearing proxy** — per-frame scan `g_edicts` for `s.event ∈ {EV_MUZZLEFLASH, EV_MUZZLEFLASH2, EV_FOOTSTEP}` within ~1500u for a "heard" memory hint. Engine bots likely have direct audio knowledge; this proxies it.
-- **Projectile lead** — required when we switch away from hitscan. Compute target velocity from `other->s.origin` delta frames, offset aim by `velocity * distance / projectile_speed`.
-- **Reaction-time / aim jitter** — only add if we're dominating too hard. Default 0, calibrate up.
+| State | When | Handler |
+|---|---|---|
+| `UST_INTERMISSION` | intermissiontime != 0 | button-pulse to advance |
+| `UST_RESPAWN`       | dead or awaiting_respawn | button-pulse to respawn |
+| `UST_SPECTATOR`     | resp.spectator | no-op |
+| `UST_COMBAT`        | visible enemy + health > 30 | aim+lead+fire, strafe |
+| `UST_HEAL`          | visible enemy + health ≤ 30 | path to health item / run away |
+| `UST_HUNT`          | no enemy + last-seen or heard | path to last-known |
+| `UST_LOOT`          | no enemy + pickup within 1600u | path to best item |
+| `UST_WANDER`        | nothing known | random explore |
+
+Each is its own `static void State_*` function in `ultron_bot.cpp`. Clean insertion points for future per-phase tuning.
+
+## Aim quality (Phase 2, shipped)
+
+- `WeaponFireCone(item_id)` — 2.5° (rail), 3° (BFG), 4° (RL splash), 5° (chain/hyper), 6° (blaster), 10° (SSG spray).
+- `WeaponProjectileSpeed(item_id)` — 0 for hitscan, 650 (RL), 600 (GL), 800 (ionripper), 1000 (blaster/hyper/BFG).
+- `LeadPoint(shooter, target, speed)` — `target.origin + target.velocity * (dist / speed)`, capped 1.5s.
+- `AimSmooth(yaw, pitch, frametime)` — rate-limits rotation to `ultron_bot_turn_speed` deg/s (default 540). Plus `ultron_bot_aim_jitter` degrees of hand-tremor noise.
+- `UpdateDamageSense(self)` — tracks `self->health` delta; on damage, stamps `g_damage_from` + `g_damage_at`. HEAL state uses the direction to run opposite the threat.
+
+## Weapon switching (Phase 4, shipped)
+
+`Ultron_SelectWeapon(self, item_id)` skips the `Bot_SetWeapon` SVF_BOT gate by lifting its internal logic: validate, check inventory, `item->use(self, item)`. Safe to call every frame.
+
+`PickBestWeapon(self, range)` returns the first usable (owned + has ammo) weapon from a range-banded preference list. Called from `State_Combat` each frame.
+
+## Item awareness (Phase 5, shipped)
+
+`FindBestPickup(self, max_dist, require_los)` scans `g_edicts[maxclients+1 .. num_edicts]`, filters to pickupable items (`inuse && item && !SVF_NOCLIENT`), ranks by `ItemWeight(self, ent) / distance`.
+
+`ItemWeight` priorities: quad 180, invuln 170, quadfire 150, mega 120+, red armor 100, unowned weapon 80, combat armor 70, large health 60+, medium health 40+, small health 15+, shards/ammo/extras lower. Health weights add HP deficit so they scale up when hurt.
+
+`FindBestHealthPickup(self, max_dist)` is HEAL-specific (heals + armor only).
+
+## Pathfinding (Phase 3, shipped)
+
+`gi.GetPathToGoal(req, info)` via wrapper `PlanTo(goal)` → `g_plan.next_waypoint`. `MoveTowardGoal(goal, frametime)` queries path, aims at next waypoint, drives view-relative movement. Replans on goal drift >96u or every 500ms, whichever first. Falls back to straight-line when no nav.
+
+## Perception augment (Phase 6, shipped)
+
+- `UpdateHearing(self)` scans active_players each frame for `s.event ∈ {EV_FOOTSTEP, EV_OTHER_FOOTSTEP, EV_PLAYER_TELEPORT, EV_FALL*}` within 1500u → stamps `g_mem.heard_at`. HUNT uses this when last-seen is stale.
+- `ExtrapolateLastSeen()` — `g_mem.last_seen + g_mem.last_seen_vel * min(elapsed, 1s)`. HUNT aims at the extrapolated position so Ultron rounds corners where the enemy actually is.
+- `g_mem.last_seen_vel` captured each sight from `other->velocity`.
+
+## Persistent brain (Phase 7, shipped) — THE LEARNING FEATURE
+
+Per-map JSON file at `%USERPROFILE%\Saved Games\Nightdive Studios\Quake II\Ultron\brain\<map>.json`.
+
+Schema (will grow):
+```json
+{
+  "map": "q2dm1",
+  "games_played": 12,
+  "total_frags": 34,
+  "total_deaths": 47,
+  "total_shots": 0,
+  "items": [
+    { "classname": "item_health", "x": ..., "y": ..., "z": ..., "seen_count": 5072 }
+  ]
+}
+```
+
+- `LoadBrain(mapname)` runs from `Ultron_OnClientBegin` once per human spawn.
+- `SaveBrain()` runs every 30s in `BrainTick`, plus on `Ultron_OnClientDisconnect`.
+- `BrainNoteItemSight(e)` called inside `FindBestPickup` scan.
+- `BrainNoteDeath()` called from `UpdateDamageSense` on health <= 0 transition.
+- `games_played` bumped once per map load (gated by `g_counted_this_game`).
+- Score deltas in `BrainTick` roll `total_frags` forward.
+
+Uses jsoncpp (already linked) + `std::filesystem` for the brain directory.
+
+## Cvars summary
+
+**Control:**
+- `ultron_play_self` (1) — intercept on/off.
+- `ultron_autostart` (1) — DM bootstrap in InitGame.
+- `ultron_eval_seconds` (0) — auto-quit + telemetry; set by eval harness.
+- `ultron_bootstrapped` (internal) — one-shot reentry guard.
+
+**Tuning (live — no rebuild needed):**
+- `ultron_bot_fire_cone` (0 = auto per-weapon) — override global degrees.
+- `ultron_bot_move_speed` (400) — Q2 run speed.
+- `ultron_bot_strafe_period` (500ms).
+- `ultron_bot_backpedal_dist` (200u).
+- `ultron_bot_memory_ms` (2000).
+- `ultron_bot_turn_speed` (540 deg/s).
+- `ultron_bot_aim_jitter` (0.3°).
+- `ultron_bot_no_fire` / `no_move` / `no_strafe` (0) — isolation toggles.
+- `ultron_bot_auto_weapon` (1) — weapon switching.
+- `ultron_bot_wander` (1) / `ultron_bot_wander_probe` (128u).
+- `ultron_bot_debug` (0) — per-decision logs at ~4 Hz.
+
+## Still open (not yet implemented)
+
+- **Strafe-jumping** — Q2 air-control speed boost trick; the plan says ~600 u/s vs 320 u/s walking.
+- **Brain-derived priors** — the brain tracks data, but no decision yet reads it. Next obvious wins: start match pathing to highest-value `items[]` entry, time mega/red armor respawns.
+- **Tactical grid / hot-spot weights** — score deaths_here vs frags_here per 128u cell.
+- **Chat / trash talk** — Kex bots have `bot_chat_enable`; we should emit too.
+- **Reaction-time variance** — fixed at 0 right now (no self-handicap).
+- **Damage / hit stats** — we track fire_ticks + target_ticks but not "did this shot hit something." Would need to hook `T_Damage` to credit kills to Ultron.

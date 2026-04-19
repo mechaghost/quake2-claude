@@ -1,5 +1,9 @@
 # Ultron roadmap: from MVP to "indistinguishable from human"
 
+## Status: Phases 2, 3, 4, 5, 6, 7, 8, 9 all shipped in one burst (see git log `f358f09..b3a5505`). Polish + tuning ongoing.
+
+
+
 ## Goal
 
 Ultron reaches a state where:

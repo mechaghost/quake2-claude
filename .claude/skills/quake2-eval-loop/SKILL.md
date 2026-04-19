@@ -41,6 +41,16 @@ eval.bat -Quiet                       # suppress the tail-of-log dump
 eval.bat -KeepRunning                 # launch but don't wait/kill (manual poke)
 ```
 
+## Run the baseline suite
+
+```
+eval-suite.bat                              # default: stationary, passive, baseline, hardmode, 20s each
+eval-suite.bat -Duration 30 -Runs 2         # 30s per run, 2 runs per scenario
+eval-suite.bat -Scenarios baseline,stationary
+```
+
+Per-scenario table + aggregate total_score. Appends a row to `eval-logs/suite-history.csv` keyed by git commit SHA so progress is trackable across commits. Emits `SUITE_JSON:` line for automation.
+
 ## Compare two runs
 
 ```
@@ -67,6 +77,18 @@ All `ultron_bot_*` cvars are runtime-live; pass via `-Cvars` or set in console.
 | `ultron_bot_debug` | 0 | 1 = log per-decision at ~4 Hz |
 | `ultron_play_self` | 1 | 0 = hand control back to human |
 | `ultron_eval_seconds` | 0 | >0 = auto-quit after N seconds |
+
+## DM-mode validity check
+
+`dm_valid` fields tell you whether the match actually entered DM. Two signals:
+- Log contains `[ultron] autostart: ... deathmatch=1` banner or `[eval] start ... deathmatch=1`.
+- At least one non-Mechaghost "`<name> connected.`" line (confirming `addbot` actually spawned an opponent — bot names can have spaces, e.g. "The Makron").
+
+When `dm_invalid > 0` in the aggregate, treat the run's numbers as untrustworthy.
+
+## Brain file
+
+Each run loads and saves `%USERPROFILE%\Saved Games\Nightdive Studios\Quake II\Ultron\brain\<map>.json`. `games_played` and other lifetime counters grow. Inspect manually to watch Ultron's knowledge accumulate.
 
 ## What the JSON line contains
 
