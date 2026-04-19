@@ -258,6 +258,114 @@ static vec3_t AimAtPoint(edict_t *self, const vec3_t &point, float frametime_s) 
 }
 
 // ---------------------------------------------------------------------------
+// Item awareness
+
+// Weight of an item for general "pick this up" reasoning. Higher = more
+// valuable. Returns 0 for items we don't want (already have plenty of).
+static float ItemWeight(edict_t *self, edict_t *item_ent) {
+    if (!item_ent->item) return 0.0f;
+    item_id_t id = item_ent->item->id;
+    gclient_t *c = self->client;
+
+    // Powerups = always grab (Quad / Invuln are match-winners).
+    if (id == IT_ITEM_QUAD)             return 180.0f;
+    if (id == IT_ITEM_QUADFIRE)         return 150.0f;
+    if (id == IT_ITEM_INVULNERABILITY)  return 170.0f;
+
+    // Health: highest when we're hurt.
+    float hp_deficit = std::max(0.0f, 100.0f - self->health);
+    if (id == IT_HEALTH_MEGA)   return 120.0f + hp_deficit * 0.5f;
+    if (id == IT_HEALTH_LARGE)  return  60.0f + hp_deficit * 0.4f;
+    if (id == IT_HEALTH_MEDIUM) return  40.0f + hp_deficit * 0.3f;
+    if (id == IT_HEALTH_SMALL)  return  15.0f + hp_deficit * 0.2f;
+
+    // Armor. Body (red) is top; combat/jacket scale down; shards are low.
+    if (id == IT_ARMOR_BODY)    return 100.0f;
+    if (id == IT_ARMOR_COMBAT)  return  70.0f;
+    if (id == IT_ARMOR_JACKET)  return  40.0f;
+    if (id == IT_ARMOR_SHARD)   return  10.0f;
+
+    // Weapons: big weight if we don't own it, low if we already have one.
+    if (item_ent->item->flags & IF_WEAPON) {
+        if (c->pers.inventory[id] <= 0) return 80.0f;
+        return 8.0f;  // extra copy — mostly just ammo
+    }
+
+    // Ammo: only valuable if we have the weapon that uses it and are low.
+    if (item_ent->item->flags & IF_AMMO) {
+        int cur = c->pers.inventory[id];
+        if (cur < 50) return 20.0f;
+        return 3.0f;
+    }
+
+    // Default trickle value so "something we've never seen" isn't zero.
+    return 5.0f;
+}
+
+// Only items that are on the map AND currently pickupable (not respawning)
+// AND not already consumed by us in coop/instance.
+static bool ItemIsPickupable(edict_t *self, edict_t *ent) {
+    if (!ent->inuse) return false;
+    if (!ent->item)  return false;
+    if (ent->svflags & SVF_NOCLIENT) return false;      // hidden / respawning
+    if (ent->solid   == SOLID_NOT)   return false;
+    return true;
+}
+
+// Scan the edict array for the best reachable pickup. "Reachable" here
+// means visible via eye-to-origin traceline — the cheap proxy for nav.
+// Phase 3 (pathfinding) replaces this LoS check with a real path query.
+static edict_t *FindBestPickup(edict_t *self, float max_dist, bool require_los) {
+    edict_t *best = nullptr;
+    float    best_score = 0.0f;
+    const int first = game.maxclients + 1;  // skip player edicts
+    for (int i = first; i < globals.num_edicts; i++) {
+        edict_t *e = &g_edicts[i];
+        if (!ItemIsPickupable(self, e)) continue;
+        float w = ItemWeight(self, e);
+        if (w <= 0.0f) continue;
+        float d = (e->s.origin - self->s.origin).length();
+        if (d > max_dist) continue;
+        if (require_los) {
+            vec3_t eye = EyePos(self);
+            trace_t tr = gi.traceline(eye, e->s.origin + vec3_t{0, 0, 16.0f}, self, MASK_SOLID);
+            if (tr.fraction < 0.99f && tr.ent != e) continue;
+        }
+        // Weight / distance is the usual "value density" heuristic.
+        float score = w / std::max(1.0f, d);
+        if (score > best_score) {
+            best_score = score;
+            best       = e;
+        }
+    }
+    return best;
+}
+
+// "Health-only" variant for HEAL state — armor counts as a heal proxy
+// because damage eats armor first.
+static edict_t *FindBestHealthPickup(edict_t *self, float max_dist) {
+    edict_t *best = nullptr;
+    float    best_score = 0.0f;
+    const int first = game.maxclients + 1;
+    for (int i = first; i < globals.num_edicts; i++) {
+        edict_t *e = &g_edicts[i];
+        if (!ItemIsPickupable(self, e)) continue;
+        item_id_t id = e->item->id;
+        bool is_heal = (id == IT_HEALTH_SMALL || id == IT_HEALTH_MEDIUM ||
+                        id == IT_HEALTH_LARGE || id == IT_HEALTH_MEGA ||
+                        id == IT_ARMOR_BODY   || id == IT_ARMOR_COMBAT ||
+                        id == IT_ARMOR_JACKET || id == IT_ARMOR_SHARD);
+        if (!is_heal) continue;
+        float d = (e->s.origin - self->s.origin).length();
+        if (d > max_dist) continue;
+        float w = ItemWeight(self, e);
+        float score = w / std::max(1.0f, d);
+        if (score > best_score) { best_score = score; best = e; }
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------------------
 // Weapon knowledge
 
 // Current weapon id, or IT_NULL if unarmed / switching.
@@ -560,7 +668,13 @@ static ultron_state_t DecideState(edict_t *self, edict_t *visible_enemy, bool ha
         return UST_COMBAT;
     }
     if (have_memory) return UST_HUNT;
-    // Future: UST_LOOT when we know of a high-value nearby item (Phase 5).
+
+    // No enemy and no memory — consider LOOT if a valuable pickup is near.
+    // Cheap check: any LoS-reachable item in 1200u. FindBestPickup returns
+    // null if nothing good → we fall through to WANDER.
+    edict_t *pick = FindBestPickup(self, 1200.0f, true);
+    if (pick) return UST_LOOT;
+
     return UST_WANDER;
 }
 
@@ -613,11 +727,18 @@ static void State_Hunt(edict_t *self, usercmd_t *ucmd, float frametime_s) {
     DriveMovement(self, ucmd, aim_point, desired[YAW]);
 }
 
-// Heal state: low HP, break line with enemy, find space. Phase 5 wires this
-// to known health items. For now: back away from last-seen direction with
-// strafe-jink, to look less like a sitting target.
+// Heal state: low HP. Walk toward the nearest reachable health/armor. If
+// nothing in sight, run away from last damage direction and fall through
+// to wander so we at least keep moving.
 static void State_Heal(edict_t *self, usercmd_t *ucmd, float frametime_s) {
-    // If we have a threat direction, run directly away from it.
+    edict_t *heal = FindBestHealthPickup(self, 1600.0f);
+    if (heal) {
+        vec3_t aim_point = heal->s.origin + vec3_t{0, 0, 16.0f};
+        vec3_t desired   = AimAtPoint(self, aim_point, frametime_s);
+        DriveMovement(self, ucmd, aim_point, desired[YAW]);
+        return;
+    }
+    // No heal item visible — break line with whoever hurt us last.
     if (g_damage_at != 0_ms && (level.time - g_damage_at).seconds<float>() < 3.0f) {
         vec3_t away = (self->s.origin - g_damage_from);
         away[2] = 0.0f;
@@ -631,14 +752,18 @@ static void State_Heal(edict_t *self, usercmd_t *ucmd, float frametime_s) {
             return;
         }
     }
-    // Fallback: just wander, but faster turnover to find a corner.
     DriveWander(self, ucmd, frametime_s);
 }
 
-// Loot state: placeholder that falls back to wander until Phase 5 implements
-// item awareness + reachable-item selection.
+// Loot state: walk straight at the highest-value nearby pickupable item.
+// Phase 3 will replace this walk-line with real pathfinding so we can
+// cross rooms rather than just grabbing whatever happens to be in LoS.
 static void State_Loot(edict_t *self, usercmd_t *ucmd, float frametime_s) {
-    DriveWander(self, ucmd, frametime_s);
+    edict_t *pick = FindBestPickup(self, 1200.0f, true);
+    if (!pick) { DriveWander(self, ucmd, frametime_s); return; }
+    vec3_t aim_point = pick->s.origin + vec3_t{0, 0, 16.0f};
+    vec3_t desired   = AimAtPoint(self, aim_point, frametime_s);
+    DriveMovement(self, ucmd, aim_point, desired[YAW]);
 }
 
 // Respawn / intermission button pulsers, extracted so dispatcher stays clean.
