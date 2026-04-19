@@ -2,19 +2,18 @@
 <#
 Eval harness: launch the game with the current mod, let it run for a bounded
 duration, kill it if it doesn't self-exit, then summarize what happened.
-
-Workflow Claude (or the user) runs in a loop:
-  1. .\eval.ps1 -Duration 30       # runs one match, mod auto-quits at 30s
-  2. read the printed summary + eval.log
-  3. edit code
-  4. repeat
+Supports named scenarios (ablate the engine bot) and N repeat runs with
+aggregate statistics.
 
 Usage:
-  eval.ps1                         # 30s window on q2dm1, windowed mode
-  eval.ps1 -Duration 60            # 60s window
-  eval.ps1 -Map q2dm3              # different map
-  eval.ps1 -OutDir .\eval-logs     # where to save the log (default ./eval-logs)
-  eval.ps1 -KeepRunning            # skip the auto-kill pass (for manual poke)
+  eval.ps1                              # baseline 30s run
+  eval.ps1 -Duration 60                 # longer match
+  eval.ps1 -Scenario stationary         # enemy bot can't move
+  eval.ps1 -Scenario noaim              # enemy bot can't aim
+  eval.ps1 -Scenario hardmode           # enemy bot has perfect aim
+  eval.ps1 -Runs 3                      # repeat 3x, aggregate avg
+  eval.ps1 -Cvars @{mymod_bot_fire_cone=3; mymod_bot_no_strafe=1}
+  eval.ps1 -Debug                       # enables mymod_bot_debug + bot_debugSystem
 #>
 
 [CmdletBinding()]
@@ -24,7 +23,13 @@ param(
     [string]$OutDir = "$PSScriptRoot\eval-logs",
     [switch]$KeepRunning,
     [switch]$Fullscreen,
-    [switch]$Quiet             # suppress the tail-of-log dump at end
+    [switch]$Quiet,
+    [ValidateSet('', 'baseline','stationary','passive','noaim','deaf','hardmode','crippled')]
+    [string]$Scenario = 'baseline',
+    [int]$Runs = 1,
+    [int]$BotSkill = -1,
+    [switch]$DebugBot,
+    [hashtable]$Cvars = @{}
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,104 +40,166 @@ $StderrPath = Join-Path $SavedGames 'stderr.txt'
 $CrashLog   = 'D:\SteamLibrary\steamapps\common\Quake 2\rerelease\CRASHLOG.TXT'
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-$stamp    = (Get-Date).ToString('yyyyMMdd-HHmmss')
-$outFile  = Join-Path $OutDir "eval-$stamp.log"
 
-# --- 1) clear prior logs so we only see this run's output ----------------
-Remove-Item -LiteralPath $StdoutPath,$StderrPath,$CrashLog -ErrorAction SilentlyContinue
-
-# --- 2) launch via modlaunch (which builds if needed, then starts engine) --
-$mlArgs = @{
-    StartMap    = $Map
-    EvalSeconds = $Duration
+# Scenario -> (launcher EnemyMode, extra cvars).
+$scenarioSpec = @{
+    'baseline'   = @{ EnemyMode = 'normal';     Extras = @{} }
+    'stationary' = @{ EnemyMode = 'stationary'; Extras = @{} }
+    'passive'    = @{ EnemyMode = 'passive';    Extras = @{} }
+    'noaim'      = @{ EnemyMode = 'noaim';      Extras = @{} }
+    'deaf'       = @{ EnemyMode = 'deaf';       Extras = @{} }
+    'hardmode'   = @{ EnemyMode = 'instant';    Extras = @{} }
+    'crippled'   = @{ EnemyMode = 'crippled';   Extras = @{} }
 }
-if ($Fullscreen) { $mlArgs['Fullscreen'] = $true }
-Write-Host "[eval] launching: duration=$Duration map=$Map" -ForegroundColor Cyan
-& (Join-Path $PSScriptRoot 'modlaunch.ps1') @mlArgs | Out-Host
+if (-not $Scenario) { $Scenario = 'baseline' }
+if (-not $scenarioSpec.ContainsKey($Scenario)) { throw "Unknown scenario '$Scenario'" }
+$spec = $scenarioSpec[$Scenario]
 
-# --- 3) wait for the game to exit, or force-kill past the margin ---------
+function Invoke-OneRun {
+    param([int]$RunIdx)
+    $stamp   = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $runTag  = if ($Runs -gt 1) { "-run$RunIdx" } else { '' }
+    $outFile = Join-Path $OutDir "eval-$Scenario-$stamp$runTag.log"
+
+    Remove-Item -LiteralPath $StdoutPath,$StderrPath,$CrashLog -ErrorAction SilentlyContinue
+
+    $mergedCvars = @{}
+    foreach ($k in $spec.Extras.Keys) { $mergedCvars[$k] = $spec.Extras[$k] }
+    foreach ($k in $Cvars.Keys)       { $mergedCvars[$k] = $Cvars[$k] }
+
+    $mlArgs = @{
+        StartMap    = $Map
+        EvalSeconds = $Duration
+        EnemyMode   = $spec.EnemyMode
+        Cvars       = $mergedCvars
+    }
+    if ($Fullscreen) { $mlArgs['Fullscreen'] = $true }
+    if ($DebugBot)   { $mlArgs['DebugBot']   = $true }
+    if ($BotSkill -ge 0) { $mlArgs['BotSkill'] = $BotSkill }
+
+    Write-Host ("[eval] run {0}/{1}: scenario={2} duration={3}s map={4}" -f $RunIdx,$Runs,$Scenario,$Duration,$Map) -ForegroundColor Cyan
+    & (Join-Path $PSScriptRoot 'modlaunch.ps1') @mlArgs | Out-Host
+    return $outFile
+}
+
+function Wait-AndCollect {
+    param([string]$OutFile)
+
+    Start-Sleep -Seconds 6
+    if (-not (Get-Process -Name quake2ex_steam -ErrorAction SilentlyContinue)) {
+        Write-Host "[eval] warning: engine not running 6s after launch" -ForegroundColor Yellow
+    }
+
+    $deadline = (Get-Date).AddSeconds($Duration + 20)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Name quake2ex_steam -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Seconds 1
+    }
+    if (Get-Process -Name quake2ex_steam -ErrorAction SilentlyContinue) {
+        Write-Host "[eval] process did not auto-quit; force-killing" -ForegroundColor Yellow
+        Stop-Process -Name quake2ex_steam -Force
+        Start-Sleep -Seconds 2
+    }
+
+    $stdoutLines = @()
+    if (Test-Path -LiteralPath $StdoutPath) {
+        Copy-Item -LiteralPath $StdoutPath -Destination $OutFile -Force
+        $stdoutLines = Get-Content -LiteralPath $StdoutPath
+    }
+    $crashed = Test-Path -LiteralPath $CrashLog
+    $modLines  = $stdoutLines | Where-Object { $_ -match '\[(mymod|eval)\]' }
+    $evalLines = $modLines    | Where-Object { $_ -match '\[eval\]' }
+    $last = $evalLines | Where-Object { $_ -match '\[eval\] t=' } | Select-Object -Last 1
+
+    $stats = [ordered]@{
+        scenario     = $Scenario
+        duration_s   = $Duration
+        crashed      = $crashed
+        stdout_lines = $stdoutLines.Count
+        mymod_lines  = $modLines.Count
+        eval_lines   = $evalLines.Count
+        log_file     = $OutFile
+    }
+    if ($last -and $last -match 't=(?<t>[\d\.]+)\s+score=(?<s>-?\d+)\s+health=(?<h>-?\d+)\s+fire_ticks=(?<f>\d+)\s+target_ticks=(?<tt>\d+)\s+idle_ticks=(?<i>\d+)') {
+        $stats['last_t']       = [double]$Matches.t
+        $stats['last_score']   = [int]$Matches.s
+        $stats['last_health']  = [int]$Matches.h
+        $stats['fire_ticks']   = [int]$Matches.f
+        $stats['target_ticks'] = [int]$Matches.tt
+        $stats['idle_ticks']   = [int]$Matches.i
+    }
+    return @{ stats = $stats; mod_lines = $modLines; crashed = $crashed }
+}
+
 if ($KeepRunning) {
+    Invoke-OneRun -RunIdx 1 | Out-Null
     Write-Host "[eval] -KeepRunning set; leaving the game alive. Exiting harness." -ForegroundColor Yellow
     exit 0
 }
 
-# Give the engine time to boot and actually start the process before we
-# look for it. Kex takes ~4-6s on a warm cache.
-Start-Sleep -Seconds 6
-
-$seen = Get-Process -Name quake2ex_steam -ErrorAction SilentlyContinue
-if (-not $seen) {
-    Write-Host "[eval] warning: quake2ex_steam not running 6s after launch; log capture may be empty" -ForegroundColor Yellow
+# --- run N back-to-back -----------------------------------------------------
+$all = @()
+for ($i = 1; $i -le $Runs; $i++) {
+    $outFile = Invoke-OneRun -RunIdx $i
+    $res = Wait-AndCollect -OutFile $outFile
+    $all += , $res
 }
 
-# Poll until process exits or we pass the deadline (Duration + startup grace
-# + flush margin).
-$deadline = (Get-Date).AddSeconds($Duration + 20)
-while ((Get-Date) -lt $deadline) {
-    $proc = Get-Process -Name quake2ex_steam -ErrorAction SilentlyContinue
-    if (-not $proc) { break }
-    Start-Sleep -Seconds 1
-}
-$proc = Get-Process -Name quake2ex_steam -ErrorAction SilentlyContinue
-if ($proc) {
-    Write-Host "[eval] process did not auto-quit; force-killing" -ForegroundColor Yellow
-    Stop-Process -Name quake2ex_steam -Force
-    Start-Sleep -Seconds 2   # give the engine a moment to flush stdout.txt
-}
-
-# --- 4) collect output ---------------------------------------------------
-$stdoutLines = @()
-$stderrLines = @()
-if (Test-Path -LiteralPath $StdoutPath) {
-    # Copy into outFile so we keep a record independent of the game's next run
-    Copy-Item -LiteralPath $StdoutPath -Destination $outFile -Force
-    $stdoutLines = Get-Content -LiteralPath $StdoutPath
-}
-if (Test-Path -LiteralPath $StderrPath) {
-    $stderrLines = Get-Content -LiteralPath $StderrPath
-}
-$crashed = Test-Path -LiteralPath $CrashLog
-
-$modLines = $stdoutLines | Where-Object { $_ -match '\[(mymod|eval)\]' }
-$evalLines = $modLines | Where-Object { $_ -match '^\[eval\]' }
-
-# --- 5) parse the last telemetry line for a quick stats snapshot ---------
-$last = $evalLines | Where-Object { $_ -match '\[eval\] t=' } | Select-Object -Last 1
-$stats = [ordered]@{
-    duration_s    = $Duration
-    crashed       = $crashed
-    stdout_lines  = $stdoutLines.Count
-    mymod_lines   = $modLines.Count
-    eval_lines    = $evalLines.Count
-    log_file      = $outFile
-}
-if ($last -and $last -match 't=(?<t>[\d\.]+)\s+score=(?<s>-?\d+)\s+health=(?<h>-?\d+)\s+fire_ticks=(?<f>\d+)\s+target_ticks=(?<tt>\d+)\s+idle_ticks=(?<i>\d+)') {
-    $stats['last_t']          = [double]$Matches.t
-    $stats['last_score']      = [int]$Matches.s
-    $stats['last_health']     = [int]$Matches.h
-    $stats['fire_ticks']      = [int]$Matches.f
-    $stats['target_ticks']    = [int]$Matches.tt
-    $stats['idle_ticks']      = [int]$Matches.i
-}
-
-# --- 6) print summary ----------------------------------------------------
+# --- per-run table ---------------------------------------------------------
 Write-Host ""
-Write-Host "=== eval summary ===" -ForegroundColor Green
-$stats.GetEnumerator() | ForEach-Object { Write-Host ("  {0,-14} {1}" -f $_.Key, $_.Value) }
+Write-Host "=== eval summary (scenario=$Scenario, runs=$Runs) ===" -ForegroundColor Green
+$fmt = '{0,-4} {1,-6} {2,-7} {3,-7} {4,-7} {5,-6} {6,-6} {7}'
+Write-Host ($fmt -f 'run','score','health','fire','target','idle','t','log')
+$runIdx = 0
+foreach ($r in $all) {
+    $runIdx++
+    $s = $r.stats
+    $score  = if ($s.Contains('last_score'))  { $s['last_score']  } else { '?' }
+    $health = if ($s.Contains('last_health')) { $s['last_health'] } else { '?' }
+    $fire   = if ($s.Contains('fire_ticks'))  { $s['fire_ticks']  } else { '?' }
+    $target = if ($s.Contains('target_ticks')){ $s['target_ticks']} else { '?' }
+    $idle   = if ($s.Contains('idle_ticks'))  { $s['idle_ticks']  } else { '?' }
+    $t      = if ($s.Contains('last_t'))      { $s['last_t']      } else { '?' }
+    Write-Host ($fmt -f $runIdx,$score,$health,$fire,$target,$idle,$t,(Split-Path -Leaf $s.log_file))
+}
 
-if ($crashed) {
+# --- aggregate -------------------------------------------------------------
+function MeanOf($list) { if ($list.Count -eq 0) { return 0 } ; ($list | Measure-Object -Average).Average }
+$scores  = @($all | ForEach-Object { $_.stats['last_score']  } | Where-Object { $_ -ne $null })
+$healths = @($all | ForEach-Object { $_.stats['last_health'] } | Where-Object { $_ -ne $null })
+$fires   = @($all | ForEach-Object { $_.stats['fire_ticks']  } | Where-Object { $_ -ne $null })
+$targets = @($all | ForEach-Object { $_.stats['target_ticks']} | Where-Object { $_ -ne $null })
+$idles   = @($all | ForEach-Object { $_.stats['idle_ticks']  } | Where-Object { $_ -ne $null })
+$crashCount = @($all | Where-Object { $_.crashed }).Count
+
+$agg = [ordered]@{
+    scenario   = $Scenario
+    runs       = $Runs
+    duration   = $Duration
+    avg_score  = [math]::Round((MeanOf $scores),  2)
+    avg_health = [math]::Round((MeanOf $healths), 1)
+    avg_fire   = [math]::Round((MeanOf $fires),   0)
+    avg_target = [math]::Round((MeanOf $targets), 0)
+    avg_idle   = [math]::Round((MeanOf $idles),   0)
+    crashes    = $crashCount
+}
+
+Write-Host ""
+Write-Host "--- aggregate ---" -ForegroundColor Green
+$agg.GetEnumerator() | ForEach-Object { Write-Host ("  {0,-12} {1}" -f $_.Key, $_.Value) }
+
+if ($crashCount -gt 0 -and (Test-Path -LiteralPath $CrashLog)) {
     Write-Host ""
-    Write-Host "--- CRASHLOG.TXT head ---" -ForegroundColor Red
+    Write-Host "--- CRASHLOG.TXT head (latest crash) ---" -ForegroundColor Red
     Get-Content -LiteralPath $CrashLog -TotalCount 25 | ForEach-Object { Write-Host "  $_" }
 }
 
-if (-not $Quiet) {
+if (-not $Quiet -and $all.Count -eq 1) {
     Write-Host ""
     Write-Host "--- mod log (last 30 lines) ---" -ForegroundColor Gray
-    $modLines | Select-Object -Last 30 | ForEach-Object { Write-Host "  $_" }
+    $all[0].mod_lines | Select-Object -Last 30 | ForEach-Object { Write-Host "  $_" }
 }
 
-# emit a machine-readable tail so a caller can parse without re-running
-$json = $stats | ConvertTo-Json -Compress
+$json = $agg | ConvertTo-Json -Compress
 Write-Host ""
 Write-Host "JSON: $json"

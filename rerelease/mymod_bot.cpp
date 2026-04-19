@@ -20,6 +20,18 @@
 cvar_t *mymod_play_self = nullptr;
 cvar_t *mymod_eval_seconds = nullptr;
 
+// Tuning knobs — no rebuild needed, just `mymod_bot_fire_cone 3` in console
+// or `+set mymod_bot_fire_cone 3` at launch.
+cvar_t *mymod_bot_fire_cone       = nullptr;  // degrees; fire if view-forward within this cone of target
+cvar_t *mymod_bot_move_speed      = nullptr;  // units/sec; Q2 run is ~400
+cvar_t *mymod_bot_strafe_period   = nullptr;  // ms between strafe direction flips
+cvar_t *mymod_bot_backpedal_dist  = nullptr;  // units; back away when closer than this
+cvar_t *mymod_bot_memory_ms       = nullptr;  // how long we remember a lost target
+cvar_t *mymod_bot_no_fire         = nullptr;  // 1 = never press BUTTON_ATTACK
+cvar_t *mymod_bot_no_move         = nullptr;  // 1 = zero out forward/side
+cvar_t *mymod_bot_no_strafe       = nullptr;  // 1 = don't auto-strafe during combat
+cvar_t *mymod_bot_debug           = nullptr;  // 1 = emit verbose per-decision logs
+
 static edict_t *g_mymod_human = nullptr;
 
 // Wall-clock start for the eval harness, captured on the human's first
@@ -42,11 +54,16 @@ struct bot_memory_t {
 };
 static bot_memory_t g_mem;
 
-constexpr gtime_t   MEMORY_WINDOW = 2_sec;
-constexpr float     FIRE_CONE_DEG = 8.0f;   // fire if aim is within this cone
-constexpr float     BACKPEDAL_DIST = 200.0f;
-constexpr float     MOVE_SPEED     = 400.0f; // Q2 normal run speed
-constexpr int64_t   STRAFE_FLIP_MS = 500;    // strafe direction flip period
+// Compile-time defaults; runtime values come from cvars below.
+constexpr gtime_t   DEFAULT_MEMORY_WINDOW = 2_sec;
+constexpr float     DEFAULT_FIRE_CONE_DEG = 8.0f;
+constexpr float     DEFAULT_BACKPEDAL_DIST = 200.0f;
+constexpr float     DEFAULT_MOVE_SPEED     = 400.0f;
+constexpr int64_t   DEFAULT_STRAFE_FLIP_MS = 500;
+
+// Resolve the live values each frame so cvar changes take effect immediately.
+static inline float  CvarF(cvar_t *cv, float  def) { return cv ? cv->value : def; }
+static inline int64_t CvarI(cvar_t *cv, int64_t def) { return cv ? cv->integer : def; }
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -95,8 +112,17 @@ bool MyMod_IsHuman(edict_t *ent) {
 // Init
 
 void MyMod_Bot_Init() {
-    mymod_play_self    = gi.cvar("mymod_play_self",    "1", CVAR_NOFLAGS);
-    mymod_eval_seconds = gi.cvar("mymod_eval_seconds", "0", CVAR_NOFLAGS);
+    mymod_play_self       = gi.cvar("mymod_play_self",       "1",   CVAR_NOFLAGS);
+    mymod_eval_seconds    = gi.cvar("mymod_eval_seconds",    "0",   CVAR_NOFLAGS);
+    mymod_bot_fire_cone   = gi.cvar("mymod_bot_fire_cone",   "8",   CVAR_NOFLAGS);
+    mymod_bot_move_speed  = gi.cvar("mymod_bot_move_speed",  "400", CVAR_NOFLAGS);
+    mymod_bot_strafe_period = gi.cvar("mymod_bot_strafe_period", "500", CVAR_NOFLAGS);
+    mymod_bot_backpedal_dist = gi.cvar("mymod_bot_backpedal_dist","200", CVAR_NOFLAGS);
+    mymod_bot_memory_ms   = gi.cvar("mymod_bot_memory_ms",   "2000", CVAR_NOFLAGS);
+    mymod_bot_no_fire     = gi.cvar("mymod_bot_no_fire",     "0",   CVAR_NOFLAGS);
+    mymod_bot_no_move     = gi.cvar("mymod_bot_no_move",     "0",   CVAR_NOFLAGS);
+    mymod_bot_no_strafe   = gi.cvar("mymod_bot_no_strafe",   "0",   CVAR_NOFLAGS);
+    mymod_bot_debug       = gi.cvar("mymod_bot_debug",       "0",   CVAR_NOFLAGS);
     g_mymod_human  = nullptr;
     g_mem          = {};
     g_eval_start   = 0_ms;
@@ -168,6 +194,13 @@ static vec3_t AimAtPoint(edict_t *self, const vec3_t &point) {
 // Fill ucmd->forwardmove/sidemove to move toward goal_world from self, given
 // the yaw we're about to face. Side-strafes at a fixed cadence for dodging.
 static void DriveMovement(edict_t *self, usercmd_t *ucmd, const vec3_t &goal_world, float face_yaw) {
+    if (CvarI(mymod_bot_no_move, 0)) { ucmd->forwardmove = ucmd->sidemove = 0.0f; return; }
+
+    const float   speed       = CvarF(mymod_bot_move_speed, DEFAULT_MOVE_SPEED);
+    const float   backpedal   = CvarF(mymod_bot_backpedal_dist, DEFAULT_BACKPEDAL_DIST);
+    const int64_t strafe_ms   = CvarI(mymod_bot_strafe_period, DEFAULT_STRAFE_FLIP_MS);
+    const bool    no_strafe   = CvarI(mymod_bot_no_strafe, 0) != 0;
+
     vec3_t wd = goal_world - self->s.origin;
     wd[2] = 0.0f;
     float dist_xy = wd.normalize();
@@ -175,18 +208,21 @@ static void DriveMovement(edict_t *self, usercmd_t *ucmd, const vec3_t &goal_wor
     vec3_t fwd, rt;
     AngleVectors(vec3_t{ 0.0f, face_yaw, 0.0f }, fwd, rt, nullptr);
 
-    float forward = std::clamp(wd.dot(fwd) * MOVE_SPEED, -MOVE_SPEED, MOVE_SPEED);
+    float forward = std::clamp(wd.dot(fwd) * speed, -speed, speed);
 
     // Back-pedal when uncomfortably close.
-    if (dist_xy < BACKPEDAL_DIST && forward > 0.0f) {
+    if (dist_xy < backpedal && forward > 0.0f) {
         forward = -forward;
     }
 
-    // Strafe direction flips every STRAFE_FLIP_MS; this dominates sidemove
-    // during combat because circle-strafing is generally better than
-    // face-strafing toward the target.
-    int phase = (int)(level.time.milliseconds() / STRAFE_FLIP_MS);
-    float side = (phase & 1) ? MOVE_SPEED : -MOVE_SPEED;
+    float side = 0.0f;
+    if (!no_strafe && strafe_ms > 0) {
+        int phase = (int)(level.time.milliseconds() / strafe_ms);
+        side = (phase & 1) ? speed : -speed;
+    } else {
+        // Natural sidemove toward goal (no dodging).
+        side = std::clamp(wd.dot(rt) * speed, -speed, speed);
+    }
 
     ucmd->forwardmove = forward;
     ucmd->sidemove    = side;
@@ -195,8 +231,8 @@ static void DriveMovement(edict_t *self, usercmd_t *ucmd, const vec3_t &goal_wor
 // ---------------------------------------------------------------------------
 // Fire
 
-// Returns true if self's current view forward is within FIRE_CONE_DEG of the
-// direction to target_point.
+// Returns true if self's current view forward is within mymod_bot_fire_cone
+// degrees of the direction to target_point.
 static bool AimWithinCone(edict_t *self, const vec3_t &target_point) {
     vec3_t eye = EyePos(self);
     vec3_t to_target = (target_point - eye).normalized();
@@ -205,8 +241,8 @@ static bool AimWithinCone(edict_t *self, const vec3_t &target_point) {
     AngleVectors(self->client->v_angle, view_fwd, nullptr, nullptr);
 
     float dot = view_fwd.dot(to_target);
-    // cos(8 deg) ~ 0.9903
-    float cos_thresh = cosf(FIRE_CONE_DEG * PIf / 180.0f);
+    float cone_deg = CvarF(mymod_bot_fire_cone, DEFAULT_FIRE_CONE_DEG);
+    float cos_thresh = cosf(cone_deg * PIf / 180.0f);
     return dot >= cos_thresh;
 }
 
@@ -246,13 +282,14 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     ucmd->sidemove    = 0.0f;
     ucmd->angles      = {}; // mouse delta zero; we drive view via delta_angles
 
-    // Perception: nearest visible enemy, with 2s "last seen" memory.
+    // Perception: nearest visible enemy, with configurable last-seen memory.
+    const gtime_t memory_window = gtime_t::from_ms((int64_t)CvarI(mymod_bot_memory_ms, 2000));
     edict_t *vis = FindVisibleEnemy(self);
     if (vis) {
         g_mem.target       = vis;
         g_mem.last_seen    = EyePos(vis);
         g_mem.last_seen_at = level.time;
-    } else if (g_mem.target && (level.time - g_mem.last_seen_at) > MEMORY_WINDOW) {
+    } else if (g_mem.target && (level.time - g_mem.last_seen_at) > memory_window) {
         g_mem.target = nullptr;
     }
 
@@ -282,8 +319,24 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     DriveMovement(self, ucmd, aim_point, desired[YAW]);
 
     // Fire only when we actually see the target AND our view is near it.
-    if (target && AimWithinCone(self, aim_point)) {
+    bool want_fire = target && AimWithinCone(self, aim_point);
+    if (want_fire && !CvarI(mymod_bot_no_fire, 0)) {
         ucmd->buttons |= BUTTON_ATTACK;
         g_fire_ticks++;
+    }
+
+    // Verbose per-frame dev log, when enabled. Rate-limit to ~4 Hz.
+    if (CvarI(mymod_bot_debug, 0))
+    {
+        static gtime_t last_dbg = 0_ms;
+        if ((level.time - last_dbg).milliseconds() >= 250)
+        {
+            last_dbg = level.time;
+            vec3_t dir = aim_point - EyePos(self);
+            float dist = dir.length();
+            gi.Com_PrintFmt("[mymod/dbg] tgt={} vis={} dist={:.0f} fwd={:.2f} side={:.2f} fire={}\n",
+                target ? target->s.number : -1, vis ? 1 : 0,
+                dist, ucmd->forwardmove, ucmd->sidemove, want_fire ? 1 : 0);
+        }
     }
 }

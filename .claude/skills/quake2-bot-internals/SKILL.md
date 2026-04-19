@@ -114,10 +114,24 @@ Stamped to stdout every ~1 sec as `[eval] t=X score=S health=H fire_ticks=F targ
 
 ## Cvars
 
+**Control:**
 - `mymod_play_self` (default 1) — intercept on/off. Toggle in console to hand control back to human.
 - `mymod_autostart` (default 1) — run the DM-on-q2dm1 bootstrap in `InitGame`.
 - `mymod_eval_seconds` (default 0) — auto-quit after N seconds of human gameplay; also enables telemetry.
 - `mymod_bootstrapped` (internal, auto-set) — guards re-entry on DLL reload within one engine process.
+
+**Tuning knobs (live — no rebuild needed):**
+- `mymod_bot_fire_cone` (8.0) — fire threshold in degrees.
+- `mymod_bot_move_speed` (400) — units/sec; Q2 run speed.
+- `mymod_bot_strafe_period` (500) — ms between strafe-direction flips.
+- `mymod_bot_backpedal_dist` (200) — back away when closer than this many units.
+- `mymod_bot_memory_ms` (2000) — how long we remember a lost target.
+- `mymod_bot_no_fire` (0) — 1 disables BUTTON_ATTACK (movement-only isolation).
+- `mymod_bot_no_move` (0) — 1 zeroes forward/sidemove (aim-only isolation).
+- `mymod_bot_no_strafe` (0) — 1 disables combat strafe dodge.
+- `mymod_bot_debug` (0) — 1 emits per-decision logs at ~4 Hz.
+
+Use via `+set mymod_bot_fire_cone 3` at launch, or from `eval.bat -Cvars @{mymod_bot_fire_cone=3}`. The code reads them each frame so console changes take effect immediately.
 
 ## Key files and line refs
 

@@ -48,15 +48,32 @@ From `modlaunch.ps1`:
 ## Launcher flags
 
 ```
-modlaunch.bat -WithIntro             # keep the studio logos
-modlaunch.bat -Fullscreen            # force fullscreen (default is windowed)
-modlaunch.bat -StartMap q2dm3        # load a different map
-modlaunch.bat -EvalSeconds 30        # mod auto-quits after 30s (drives eval harness)
-modlaunch.bat -Config Debug          # Debug DLL (default is Release)
-modlaunch.bat -NoBuild               # skip build, just launch
-modlaunch.bat -NoLaunch              # build only
-modlaunch.bat -Clean                 # wipe x64/, vcpkg_installed/, and the staged DLL
+modlaunch.bat -WithIntro                        # keep the studio logos
+modlaunch.bat -Fullscreen                       # force fullscreen (default is windowed)
+modlaunch.bat -StartMap q2dm3                   # load a different map
+modlaunch.bat -EvalSeconds 30                   # mod auto-quits after 30s
+modlaunch.bat -FragLimit 10                     # shorter matches (default 20)
+modlaunch.bat -BotSkill 3                       # Kex bot difficulty 0..3
+modlaunch.bat -EnemyMode stationary             # ablate the engine bot (see below)
+modlaunch.bat -DebugBot                         # mymod_bot_debug + bot_debugSystem
+modlaunch.bat -Cvars @{mymod_bot_fire_cone=3}   # inject arbitrary cvars
+modlaunch.bat -Config Debug                     # Debug DLL
+modlaunch.bat -NoBuild                          # skip build, just launch
+modlaunch.bat -NoLaunch                         # build only
+modlaunch.bat -Clean                            # wipe x64/, vcpkg_installed/, staged DLL
 ```
+
+## Enemy bot ablation presets (`-EnemyMode`)
+
+| Mode | Cvars set | Use case |
+|---|---|---|
+| `normal` | — | Unmodified engine bot. |
+| `stationary` | `bot_move_disable 1` | Target doesn't move; pure aim test. |
+| `passive` | `bot_combatDisabled 1` | No return fire; test our movement/targeting. |
+| `noaim` | `bot_aim_disabled 1` | Opponent shoots but can't aim. |
+| `deaf` | `bot_senses_disabled 1` | Opponent can't detect us. |
+| `instant` | `bot_aim_instant 1` | Perfect-aim enemy; hard-mode benchmark. |
+| `crippled` | move+aim+senses off | Punching bag — sanity check we do anything. |
 
 ## Troubleshooting
 

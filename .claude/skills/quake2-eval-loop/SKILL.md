@@ -27,10 +27,46 @@ This:
 ```
 eval.bat -Duration 60                 # longer match
 eval.bat -Map q2dm3                   # different map
-eval.bat -Fullscreen                  # rare: eval with fullscreen
+eval.bat -Runs 3                      # repeat N times and aggregate mean stats
+eval.bat -Scenario stationary         # enemy bot can't move
+eval.bat -Scenario passive            # enemy bot can't fight back
+eval.bat -Scenario noaim              # enemy bot can't aim
+eval.bat -Scenario deaf               # enemy bot can't sense
+eval.bat -Scenario hardmode           # enemy bot has perfect aim
+eval.bat -Scenario crippled           # enemy bot disabled entirely
+eval.bat -BotSkill 3                  # 0..3, Kex bot difficulty
+eval.bat -DebugBot                    # enables mymod_bot_debug + bot_debugSystem
+eval.bat -Cvars @{mymod_bot_fire_cone=3; mymod_bot_no_strafe=1}
 eval.bat -Quiet                       # suppress the tail-of-log dump
 eval.bat -KeepRunning                 # launch but don't wait/kill (manual poke)
 ```
+
+## Compare two runs
+
+```
+eval-compare.bat -Latest 2                     # diff the two most recent logs
+eval-compare.bat -A baseline.log -B hard.log   # diff specific files (auto-resolves in eval-logs/)
+```
+
+Prints a per-metric A / B / delta / % change table.
+
+## Tuning knobs — set at launch without rebuilding
+
+All `mymod_bot_*` cvars are runtime-live; pass via `-Cvars` or set in console.
+
+| Cvar | Default | Purpose |
+|---|---|---|
+| `mymod_bot_fire_cone` | 8.0 | Degrees; fire if view-forward within this cone of target |
+| `mymod_bot_move_speed` | 400 | Units/sec; Q2 run speed |
+| `mymod_bot_strafe_period` | 500 | Milliseconds between strafe flips |
+| `mymod_bot_backpedal_dist` | 200 | Back away when closer than this |
+| `mymod_bot_memory_ms` | 2000 | Last-seen target memory window |
+| `mymod_bot_no_fire` | 0 | 1 = never fire (movement-only test) |
+| `mymod_bot_no_move` | 0 | 1 = stand still (aim-only test) |
+| `mymod_bot_no_strafe` | 0 | 1 = disable combat strafe dodge |
+| `mymod_bot_debug` | 0 | 1 = log per-decision at ~4 Hz |
+| `mymod_play_self` | 1 | 0 = hand control back to human |
+| `mymod_eval_seconds` | 0 | >0 = auto-quit after N seconds |
 
 ## What the JSON line contains
 

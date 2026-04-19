@@ -26,6 +26,12 @@ param(
     [switch]$Fullscreen,       # default: windowed (no mouse grab)
     [int]$EvalSeconds = 0,     # if >0, mod auto-quits after N seconds
     [string]$StartMap = 'q2dm1',
+    [int]$FragLimit = 20,
+    [int]$BotSkill  = -1,      # 0..3 (Kex range); -1 = leave default
+    [ValidateSet('', 'normal','stationary','passive','noaim','deaf','instant','crippled')]
+    [string]$EnemyMode = '',   # preset ablations for the engine bot
+    [switch]$DebugBot,         # enable bot_debugSystem/draw cvars + mymod_bot_debug
+    [hashtable]$Cvars = @{},   # arbitrary extra cvars: @{mymod_bot_fire_cone=3}
     [ValidateSet('Release','Debug')]
     [string]$Config = 'Release'
 )
@@ -130,5 +136,43 @@ if (-not $Fullscreen) {
 if ($EvalSeconds -gt 0) {
     $launchArgs += @('+set','mymod_eval_seconds',"$EvalSeconds")
 }
+if ($FragLimit -gt 0) {
+    $launchArgs += @('+set','fraglimit',"$FragLimit")
+}
+if ($BotSkill -ge 0) {
+    $launchArgs += @('+set','bot_skill',"$BotSkill")
+}
+
+# Enemy ablation presets. Mapping is based on the Kex bot_* cvar semantics
+# documented in docs/kex-vocab-guide.md. 'crippled' stacks several for an
+# easy-mode opponent; 'instant' is hard-mode (perfect aim).
+$enemyPresets = @{
+    'normal'     = @{}
+    'stationary' = @{ 'bot_move_disable'  = 1 }
+    'passive'    = @{ 'bot_combatDisabled' = 1 }
+    'noaim'      = @{ 'bot_aim_disabled'   = 1 }
+    'deaf'       = @{ 'bot_senses_disabled'= 1 }
+    'instant'    = @{ 'bot_aim_instant'    = 1 }
+    'crippled'   = @{ 'bot_aim_disabled'   = 1; 'bot_senses_disabled' = 1; 'bot_move_disable' = 1 }
+}
+if ($EnemyMode -and $enemyPresets.ContainsKey($EnemyMode)) {
+    foreach ($k in $enemyPresets[$EnemyMode].Keys) {
+        $launchArgs += @('+set', $k, "$($enemyPresets[$EnemyMode][$k])")
+    }
+}
+
+if ($DebugBot) {
+    $launchArgs += @(
+        '+set','mymod_bot_debug','1',
+        '+set','bot_debugSystem','1',
+        '+set','con_showfps','1'
+    )
+}
+
+# Arbitrary extras (e.g. @{mymod_bot_fire_cone=3; mymod_bot_no_strafe=1}).
+foreach ($k in $Cvars.Keys) {
+    $launchArgs += @('+set', "$k", "$($Cvars[$k])")
+}
+
 Write-Host "Launching: quake2ex_steam.exe $($launchArgs -join ' ')" -ForegroundColor Cyan
 Start-Process -FilePath $Engine -ArgumentList $launchArgs
