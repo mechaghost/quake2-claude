@@ -2,7 +2,7 @@
 //
 // Architecture:
 //   - Engine calls ClientThink(edict_t*, usercmd_t*) for the human each frame.
-//   - p_client.cpp calls MyMod_Bot_Command() before it caches *ucmd into
+//   - p_client.cpp calls Ultron_Bot_Command() before it caches *ucmd into
 //     client->buttons / client->cmd, so mutating *ucmd here drives pmove,
 //     weapon fire, view angles, everything — no SVF_BOT flag needed.
 //   - Aim is forced via client->ps.pmove.delta_angles (see Edict_ForceLookAtPoint
@@ -15,27 +15,27 @@
 //   health/armor/inventory reads on enemies. Last-seen origin decays in 2s.
 
 #include "g_local.h"
-#include "mymod_bot.h"
+#include "ultron_bot.h"
 
-cvar_t *mymod_play_self = nullptr;
-cvar_t *mymod_eval_seconds = nullptr;
+cvar_t *ultron_play_self = nullptr;
+cvar_t *ultron_eval_seconds = nullptr;
 
-// Tuning knobs — no rebuild needed, just `mymod_bot_fire_cone 3` in console
-// or `+set mymod_bot_fire_cone 3` at launch.
-cvar_t *mymod_bot_fire_cone       = nullptr;  // degrees; fire if view-forward within this cone of target
-cvar_t *mymod_bot_move_speed      = nullptr;  // units/sec; Q2 run is ~400
-cvar_t *mymod_bot_strafe_period   = nullptr;  // ms between strafe direction flips
-cvar_t *mymod_bot_backpedal_dist  = nullptr;  // units; back away when closer than this
-cvar_t *mymod_bot_memory_ms       = nullptr;  // how long we remember a lost target
-cvar_t *mymod_bot_no_fire         = nullptr;  // 1 = never press BUTTON_ATTACK
-cvar_t *mymod_bot_no_move         = nullptr;  // 1 = zero out forward/side
-cvar_t *mymod_bot_no_strafe       = nullptr;  // 1 = don't auto-strafe during combat
-cvar_t *mymod_bot_debug           = nullptr;  // 1 = emit verbose per-decision logs
+// Tuning knobs — no rebuild needed, just `ultron_bot_fire_cone 3` in console
+// or `+set ultron_bot_fire_cone 3` at launch.
+cvar_t *ultron_bot_fire_cone       = nullptr;  // degrees; fire if view-forward within this cone of target
+cvar_t *ultron_bot_move_speed      = nullptr;  // units/sec; Q2 run is ~400
+cvar_t *ultron_bot_strafe_period   = nullptr;  // ms between strafe direction flips
+cvar_t *ultron_bot_backpedal_dist  = nullptr;  // units; back away when closer than this
+cvar_t *ultron_bot_memory_ms       = nullptr;  // how long we remember a lost target
+cvar_t *ultron_bot_no_fire         = nullptr;  // 1 = never press BUTTON_ATTACK
+cvar_t *ultron_bot_no_move         = nullptr;  // 1 = zero out forward/side
+cvar_t *ultron_bot_no_strafe       = nullptr;  // 1 = don't auto-strafe during combat
+cvar_t *ultron_bot_debug           = nullptr;  // 1 = emit verbose per-decision logs
 
-static edict_t *g_mymod_human = nullptr;
+static edict_t *g_Ultron_human = nullptr;
 
 // Wall-clock start for the eval harness, captured on the human's first
-// ClientBegin. Used to auto-quit after mymod_eval_seconds and to stamp the
+// ClientBegin. Used to auto-quit after ultron_eval_seconds and to stamp the
 // [eval] telemetry lines.
 static gtime_t g_eval_start  = 0_ms;
 static gtime_t g_last_telem  = 0_ms;
@@ -68,18 +68,18 @@ static inline int64_t CvarI(cvar_t *cv, int64_t def) { return cv ? cv->integer :
 // ---------------------------------------------------------------------------
 // Identity
 
-void MyMod_OnClientConnect(edict_t *ent, bool isBot) {
-    if (!isBot && !g_mymod_human) {
-        g_mymod_human = ent;
-        gi.Com_PrintFmt("[mymod] human bound to client slot {}\n", ent->s.number);
+void Ultron_OnClientConnect(edict_t *ent, bool isBot) {
+    if (!isBot && !g_Ultron_human) {
+        g_Ultron_human = ent;
+        gi.Com_PrintFmt("[ultron] human bound to client slot {}\n", ent->s.number);
     }
 }
 
-void MyMod_OnClientDisconnect(edict_t *ent) {
-    if (ent == g_mymod_human) {
-        g_mymod_human = nullptr;
+void Ultron_OnClientDisconnect(edict_t *ent) {
+    if (ent == g_Ultron_human) {
+        g_Ultron_human = nullptr;
         g_mem = {};
-        gi.Com_Print("[mymod] human disconnected; identity cleared\n");
+        gi.Com_Print("[ultron] human disconnected; identity cleared\n");
     }
     // Also drop any target we'd memorized pointing at a disconnecting edict.
     if (ent == g_mem.target) g_mem.target = nullptr;
@@ -88,14 +88,14 @@ void MyMod_OnClientDisconnect(edict_t *ent) {
 // Fire bot_add once the human is fully in the level. Firing bot_add from
 // InitGame crashed the engine (access violation at 0x0 inside the engine
 // while mid-map-init). Deferring to ClientBegin avoids that.
-void MyMod_OnClientBegin(edict_t *ent) {
+void Ultron_OnClientBegin(edict_t *ent) {
     if (!ent || !ent->client) return;
     if (ent->svflags & SVF_BOT) return;           // only trigger off the human
     if (!deathmatch || !deathmatch->integer) return;
     int count = 0;
     for (auto *p : active_players()) { (void)p; count++; }
     if (count < 2) {
-        gi.Com_Print("[mymod] spawning enemy bot via addbot\n");
+        gi.Com_Print("[ultron] spawning enemy bot via addbot\n");
         gi.AddCommandString("addbot\n");
     }
     if (g_eval_start == 0_ms) {
@@ -104,26 +104,26 @@ void MyMod_OnClientBegin(edict_t *ent) {
     }
 }
 
-bool MyMod_IsHuman(edict_t *ent) {
-    return ent != nullptr && ent == g_mymod_human;
+bool Ultron_IsHuman(edict_t *ent) {
+    return ent != nullptr && ent == g_Ultron_human;
 }
 
 // ---------------------------------------------------------------------------
 // Init
 
-void MyMod_Bot_Init() {
-    mymod_play_self       = gi.cvar("mymod_play_self",       "1",   CVAR_NOFLAGS);
-    mymod_eval_seconds    = gi.cvar("mymod_eval_seconds",    "0",   CVAR_NOFLAGS);
-    mymod_bot_fire_cone   = gi.cvar("mymod_bot_fire_cone",   "8",   CVAR_NOFLAGS);
-    mymod_bot_move_speed  = gi.cvar("mymod_bot_move_speed",  "400", CVAR_NOFLAGS);
-    mymod_bot_strafe_period = gi.cvar("mymod_bot_strafe_period", "500", CVAR_NOFLAGS);
-    mymod_bot_backpedal_dist = gi.cvar("mymod_bot_backpedal_dist","200", CVAR_NOFLAGS);
-    mymod_bot_memory_ms   = gi.cvar("mymod_bot_memory_ms",   "2000", CVAR_NOFLAGS);
-    mymod_bot_no_fire     = gi.cvar("mymod_bot_no_fire",     "0",   CVAR_NOFLAGS);
-    mymod_bot_no_move     = gi.cvar("mymod_bot_no_move",     "0",   CVAR_NOFLAGS);
-    mymod_bot_no_strafe   = gi.cvar("mymod_bot_no_strafe",   "0",   CVAR_NOFLAGS);
-    mymod_bot_debug       = gi.cvar("mymod_bot_debug",       "0",   CVAR_NOFLAGS);
-    g_mymod_human  = nullptr;
+void Ultron_Bot_Init() {
+    ultron_play_self       = gi.cvar("ultron_play_self",       "1",   CVAR_NOFLAGS);
+    ultron_eval_seconds    = gi.cvar("ultron_eval_seconds",    "0",   CVAR_NOFLAGS);
+    ultron_bot_fire_cone   = gi.cvar("ultron_bot_fire_cone",   "8",   CVAR_NOFLAGS);
+    ultron_bot_move_speed  = gi.cvar("ultron_bot_move_speed",  "400", CVAR_NOFLAGS);
+    ultron_bot_strafe_period = gi.cvar("ultron_bot_strafe_period", "500", CVAR_NOFLAGS);
+    ultron_bot_backpedal_dist = gi.cvar("ultron_bot_backpedal_dist","200", CVAR_NOFLAGS);
+    ultron_bot_memory_ms   = gi.cvar("ultron_bot_memory_ms",   "2000", CVAR_NOFLAGS);
+    ultron_bot_no_fire     = gi.cvar("ultron_bot_no_fire",     "0",   CVAR_NOFLAGS);
+    ultron_bot_no_move     = gi.cvar("ultron_bot_no_move",     "0",   CVAR_NOFLAGS);
+    ultron_bot_no_strafe   = gi.cvar("ultron_bot_no_strafe",   "0",   CVAR_NOFLAGS);
+    ultron_bot_debug       = gi.cvar("ultron_bot_debug",       "0",   CVAR_NOFLAGS);
+    g_Ultron_human  = nullptr;
     g_mem          = {};
     g_eval_start   = 0_ms;
     g_last_telem   = 0_ms;
@@ -194,12 +194,12 @@ static vec3_t AimAtPoint(edict_t *self, const vec3_t &point) {
 // Fill ucmd->forwardmove/sidemove to move toward goal_world from self, given
 // the yaw we're about to face. Side-strafes at a fixed cadence for dodging.
 static void DriveMovement(edict_t *self, usercmd_t *ucmd, const vec3_t &goal_world, float face_yaw) {
-    if (CvarI(mymod_bot_no_move, 0)) { ucmd->forwardmove = ucmd->sidemove = 0.0f; return; }
+    if (CvarI(ultron_bot_no_move, 0)) { ucmd->forwardmove = ucmd->sidemove = 0.0f; return; }
 
-    const float   speed       = CvarF(mymod_bot_move_speed, DEFAULT_MOVE_SPEED);
-    const float   backpedal   = CvarF(mymod_bot_backpedal_dist, DEFAULT_BACKPEDAL_DIST);
-    const int64_t strafe_ms   = CvarI(mymod_bot_strafe_period, DEFAULT_STRAFE_FLIP_MS);
-    const bool    no_strafe   = CvarI(mymod_bot_no_strafe, 0) != 0;
+    const float   speed       = CvarF(ultron_bot_move_speed, DEFAULT_MOVE_SPEED);
+    const float   backpedal   = CvarF(ultron_bot_backpedal_dist, DEFAULT_BACKPEDAL_DIST);
+    const int64_t strafe_ms   = CvarI(ultron_bot_strafe_period, DEFAULT_STRAFE_FLIP_MS);
+    const bool    no_strafe   = CvarI(ultron_bot_no_strafe, 0) != 0;
 
     vec3_t wd = goal_world - self->s.origin;
     wd[2] = 0.0f;
@@ -231,7 +231,7 @@ static void DriveMovement(edict_t *self, usercmd_t *ucmd, const vec3_t &goal_wor
 // ---------------------------------------------------------------------------
 // Fire
 
-// Returns true if self's current view forward is within mymod_bot_fire_cone
+// Returns true if self's current view forward is within ultron_bot_fire_cone
 // degrees of the direction to target_point.
 static bool AimWithinCone(edict_t *self, const vec3_t &target_point) {
     vec3_t eye = EyePos(self);
@@ -241,7 +241,7 @@ static bool AimWithinCone(edict_t *self, const vec3_t &target_point) {
     AngleVectors(self->client->v_angle, view_fwd, nullptr, nullptr);
 
     float dot = view_fwd.dot(to_target);
-    float cone_deg = CvarF(mymod_bot_fire_cone, DEFAULT_FIRE_CONE_DEG);
+    float cone_deg = CvarF(ultron_bot_fire_cone, DEFAULT_FIRE_CONE_DEG);
     float cos_thresh = cosf(cone_deg * PIf / 180.0f);
     return dot >= cos_thresh;
 }
@@ -249,8 +249,8 @@ static bool AimWithinCone(edict_t *self, const vec3_t &target_point) {
 // ---------------------------------------------------------------------------
 // Top-level
 
-void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
-    if (!mymod_play_self || !mymod_play_self->integer) return;
+void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
+    if (!ultron_play_self || !ultron_play_self->integer) return;
     if (!self || !self->client) return;
 
     // ALWAYS zero the human's incoming input first — no keyboard or mouse from
@@ -263,10 +263,10 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
 
     // Eval harness: auto-quit once the deadline passes, and stamp periodic
     // telemetry lines the harness can parse.
-    if (mymod_eval_seconds && mymod_eval_seconds->integer > 0 && g_eval_start != 0_ms)
+    if (ultron_eval_seconds && ultron_eval_seconds->integer > 0 && g_eval_start != 0_ms)
     {
         float elapsed = (level.time - g_eval_start).seconds<float>();
-        if (!g_quit_issued && elapsed >= (float)mymod_eval_seconds->integer)
+        if (!g_quit_issued && elapsed >= (float)ultron_eval_seconds->integer)
         {
             g_quit_issued = true;
             gi.Com_PrintFmt("[eval] done elapsed={:.2f} score={} health={} fire_ticks={} target_ticks={} idle_ticks={}\n",
@@ -310,7 +310,7 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     }
 
     // Perception: nearest visible enemy, with configurable last-seen memory.
-    const gtime_t memory_window = gtime_t::from_ms((int64_t)CvarI(mymod_bot_memory_ms, 2000));
+    const gtime_t memory_window = gtime_t::from_ms((int64_t)CvarI(ultron_bot_memory_ms, 2000));
     edict_t *vis = FindVisibleEnemy(self);
     if (vis) {
         g_mem.target       = vis;
@@ -347,13 +347,13 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
 
     // Fire only when we actually see the target AND our view is near it.
     bool want_fire = target && AimWithinCone(self, aim_point);
-    if (want_fire && !CvarI(mymod_bot_no_fire, 0)) {
+    if (want_fire && !CvarI(ultron_bot_no_fire, 0)) {
         ucmd->buttons |= BUTTON_ATTACK;
         g_fire_ticks++;
     }
 
     // Verbose per-frame dev log, when enabled. Rate-limit to ~4 Hz.
-    if (CvarI(mymod_bot_debug, 0))
+    if (CvarI(ultron_bot_debug, 0))
     {
         static gtime_t last_dbg = 0_ms;
         if ((level.time - last_dbg).milliseconds() >= 250)
@@ -361,7 +361,7 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
             last_dbg = level.time;
             vec3_t dir = aim_point - EyePos(self);
             float dist = dir.length();
-            gi.Com_PrintFmt("[mymod/dbg] tgt={} vis={} dist={:.0f} fwd={:.2f} side={:.2f} fire={}\n",
+            gi.Com_PrintFmt("[ultron/dbg] tgt={} vis={} dist={:.0f} fwd={:.2f} side={:.2f} fire={}\n",
                 target ? target->s.number : -1, vis ? 1 : 0,
                 dist, ucmd->forwardmove, ucmd->sidemove, want_fire ? 1 : 0);
         }

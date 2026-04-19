@@ -3,9 +3,9 @@
 #include "g_local.h"
 #include "m_player.h"
 #include "bots/bot_includes.h"
-#include "mymod_bot.h"
+#include "ultron_bot.h"
 
-extern cvar_t *mymod_play_self;
+extern cvar_t *ultron_play_self;
 
 void SP_misc_teleporter_dest(edict_t *ent);
 
@@ -2357,9 +2357,9 @@ void ClientBeginDeathmatch(edict_t *ent)
 	// make sure all view stuff is valid
 	ClientEndServerFrame(ent);
 
-	// [mymod] DM-path hook: ClientBegin returns early for DM so our hook
+	// [ultron] DM-path hook: ClientBegin returns early for DM so our hook
 	// in the SP branch below never fires for DM clients.
-	MyMod_OnClientBegin(ent);
+	Ultron_OnClientBegin(ent);
 }
 
 static void G_SetLevelEntry()
@@ -2528,12 +2528,12 @@ void ClientBegin(edict_t *ent)
 		if (game.maxclients > 1 && !(ent->svflags & SVF_NOCLIENT))
 			gi.LocBroadcast_Print(PRINT_HIGH, "$g_entered_game", ent->client->pers.netname);
 
-		// [mymod] hello-world greeting
+		// [ultron] hello-world greeting
 		gi.LocCenter_Print(ent, "Hello, world!\nWelcome to mymod.");
 	}
 
-	// [mymod] fire deferred bot_add once the human is fully spawned in
-	MyMod_OnClientBegin(ent);
+	// [ultron] fire deferred bot_add once the human is fully spawned in
+	Ultron_OnClientBegin(ent);
 
 	level.coop_scale_players++;
 	G_Monster_CheckCoopHealthScaling();
@@ -2916,9 +2916,9 @@ bool ClientConnect(edict_t *ent, char *userinfo, const char *social_id, bool isB
 		ent->svflags |= SVF_BOT;
 	}
 
-	// [mymod] remember which edict is the human so our usercmd intercept
+	// [ultron] remember which edict is the human so our usercmd intercept
 	// can target exactly one slot regardless of bot-vs-human connect order
-	MyMod_OnClientConnect(ent, isBot);
+	Ultron_OnClientConnect(ent, isBot);
 
 	Q_strlcpy(ent->client->pers.social_id, social_id, sizeof(ent->client->pers.social_id));
 
@@ -2949,8 +2949,8 @@ void ClientDisconnect(edict_t *ent)
 	if (!ent->client)
 		return;
 
-	// [mymod] clear cached human identity if that slot is dropping
-	MyMod_OnClientDisconnect(ent);
+	// [ultron] clear cached human identity if that slot is dropping
+	Ultron_OnClientDisconnect(ent);
 
 	// ZOID
 	CTFDeadDropFlag(ent);
@@ -3174,13 +3174,13 @@ void ClientThink(edict_t *ent, usercmd_t *ucmd)
 	level.current_entity = ent;
 	client = ent->client;
 
-	// [mymod] For the human slot we ALWAYS overwrite ucmd when play_self is
+	// [ultron] For the human slot we ALWAYS overwrite ucmd when play_self is
 	// on, even during intermission / respawn / spectator. That way the user's
 	// keyboard and mouse can never leak through. The bot function picks a
 	// state-appropriate action (combat, tap-fire-to-respawn, or full-neutral).
-	if (mymod_play_self && mymod_play_self->integer && MyMod_IsHuman(ent))
+	if (ultron_play_self && ultron_play_self->integer && Ultron_IsHuman(ent))
 	{
-		MyMod_Bot_Command(ent, ucmd);
+		Ultron_Bot_Command(ent, ucmd);
 	}
 
 	// [Paril-KEX] pass buttons through even if we are in intermission or

@@ -30,7 +30,7 @@ powershell -File modlaunch.ps1 -NoBuild:$false -NoLaunch
 - **Source**: `rerelease/` in this repo. Active files are `.cpp`/`.h`; `original/` is read-only reference.
 - **Build tool**: MSBuild 2022 at `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe`.
 - **Deps**: vcpkg at `D:\dev\vcpkg` (fmt + jsoncpp, manifest mode via `rerelease/vcpkg.json`). The launcher sets `VCPKG_ROOT` env var before MSBuild.
-- **Output**: DLL drops into `%USERPROFILE%\Saved Games\Nightdive Studios\Quake II\mymod\game_x64.dll` (mod name from `modname.txt`, currently `mymod`).
+- **Output**: DLL drops into `%USERPROFILE%\Saved Games\Nightdive Studios\Quake II\Ultron\game_x64.dll` (mod name from `modname.txt`, currently `Ultron`).
 - **OutDir/IntDir**: launcher passes forward-slash paths to avoid cmd-quoting bugs with trailing backslashes (see `modlaunch.ps1` comments).
 
 ## What the launcher does under the hood
@@ -39,7 +39,7 @@ From `modlaunch.ps1`:
 - Reads mod name from `modname.txt`.
 - Smart-skip build if newest `.cpp/.h/.hpp` is older than the DLL (ignores `x64/`, `vcpkg_installed/`, etc.).
 - Starts `D:\SteamLibrary\steamapps\common\Quake 2\rerelease\quake2ex_steam.exe` with these args unless overridden:
-  - `+set game mymod` — load our mod dir.
+  - `+set game Ultron` — load our mod dir.
   - `+set deathmatch 1 +map q2dm1` — bypass intros and land in DM directly.
   - `+set v_windowmode 0 +set v_width 800 +set v_height 600` — **Kex-specific** windowed mode (the `r_*`/`vid_*` cvars are ignored on this engine).
   - `+set g_showintromovie 0` — skip studio/logo videos.
@@ -55,8 +55,8 @@ modlaunch.bat -EvalSeconds 30                   # mod auto-quits after 30s
 modlaunch.bat -FragLimit 10                     # shorter matches (default 20)
 modlaunch.bat -BotSkill 3                       # Kex bot difficulty 0..3
 modlaunch.bat -EnemyMode stationary             # ablate the engine bot (see below)
-modlaunch.bat -DebugBot                         # mymod_bot_debug + bot_debugSystem
-modlaunch.bat -Cvars @{mymod_bot_fire_cone=3}   # inject arbitrary cvars
+modlaunch.bat -DebugBot                         # ultron_bot_debug + bot_debugSystem
+modlaunch.bat -Cvars @{ultron_bot_fire_cone=3}   # inject arbitrary cvars
 modlaunch.bat -Config Debug                     # Debug DLL
 modlaunch.bat -NoBuild                          # skip build, just launch
 modlaunch.bat -NoLaunch                         # build only

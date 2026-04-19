@@ -39,9 +39,9 @@ This launches the engine headlessly (640×480 windowed, no intro), dumps both li
 | `coop` | `0` | Force DM mode. |
 | `fraglimit` | `20` | DM end condition. |
 | `g_dm_same_level` | `1` | Rematch stays on q2dm1 instead of cycling. |
-| `mymod_eval_seconds` | `N` (harness-set) | Trigger telemetry + auto-quit in our mod. |
-| `mymod_play_self` | `1` | Enable the usercmd intercept. |
-| `mymod_autostart` | `1` | Run the DM bootstrap in InitGame. |
+| `ultron_eval_seconds` | `N` (harness-set) | Trigger telemetry + auto-quit in our mod. |
+| `ultron_play_self` | `1` | Enable the usercmd intercept. |
+| `ultron_autostart` | `1` | Run the DM bootstrap in InitGame. |
 
 ## Bot cvars worth knowing
 

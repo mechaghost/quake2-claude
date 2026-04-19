@@ -6,11 +6,11 @@ tools: Read, Edit, Grep, Glob, Bash
 
 # Bot architecture reference
 
-The bot lives in `rerelease/mymod_bot.cpp` / `mymod_bot.h` and hooks into three places in the stock game DLL.
+The bot lives in `rerelease/ultron_bot.cpp` / `ultron_bot.h` and hooks into three places in the stock game DLL.
 
 ## Input is killed unconditionally for the human slot
 
-When `mymod_play_self=1`, `MyMod_Bot_Command` **always** runs for the human's `ClientThink` — including during intermission, respawn, dead, and spectator states. The function's first action is to zero `ucmd->buttons`, `ucmd->angles`, `ucmd->forwardmove`, `ucmd->sidemove`. This guarantees no keyboard or mouse input from the user ever reaches pmove / weapon fire / view angles.
+When `ultron_play_self=1`, `Ultron_Bot_Command` **always** runs for the human's `ClientThink` — including during intermission, respawn, dead, and spectator states. The function's first action is to zero `ucmd->buttons`, `ucmd->angles`, `ucmd->forwardmove`, `ucmd->sidemove`. This guarantees no keyboard or mouse input from the user ever reaches pmove / weapon fire / view angles.
 
 In non-combat states (intermission / respawn / deadflag / spectator), the bot pulses `BUTTON_ATTACK` on a cadence to:
 - Exit intermission (~1 pulse per 6s after `intermissiontime + 5s`).
@@ -27,29 +27,29 @@ The human's character is driven by mutating `*ucmd` inside `ClientThink` before 
 
 **Gate**:
 ```cpp
-if (mymod_play_self && mymod_play_self->integer
-    && MyMod_IsHuman(ent)
+if (ultron_play_self && ultron_play_self->integer
+    && Ultron_IsHuman(ent)
     && !level.intermissiontime
     && !ent->client->awaiting_respawn
     && !ent->client->resp.spectator
     && !ent->deadflag)
 {
-    MyMod_Bot_Command(ent, ucmd);
+    Ultron_Bot_Command(ent, ucmd);
 }
 ```
 
-## Identity (`MyMod_IsHuman`)
+## Identity (`Ultron_IsHuman`)
 
 `&g_edicts[1]` is **unreliable** — bots can race the human for slot 1. We cache the first non-bot edict to connect:
-- `MyMod_OnClientConnect(ent, isBot)` called from `p_client.cpp` `ClientConnect` (after SVF_BOT is set, line ~2906).
-- `MyMod_OnClientDisconnect(ent)` called from `p_client.cpp` `ClientDisconnect` (top of function).
-- `MyMod_IsHuman(ent)` compares against the cached pointer.
+- `Ultron_OnClientConnect(ent, isBot)` called from `p_client.cpp` `ClientConnect` (after SVF_BOT is set, line ~2906).
+- `Ultron_OnClientDisconnect(ent)` called from `p_client.cpp` `ClientDisconnect` (top of function).
+- `Ultron_IsHuman(ent)` compares against the cached pointer.
 
 ## ClientBegin hook
 
-DM mode is a separate path in `p_client.cpp`: `ClientBegin` returns early to `ClientBeginDeathmatch`, so our SP-path hook at the bottom of `ClientBegin` never runs for DM. We call `MyMod_OnClientBegin(ent)` from **both** `ClientBegin` and `ClientBeginDeathmatch` (near the end of each).
+DM mode is a separate path in `p_client.cpp`: `ClientBegin` returns early to `ClientBeginDeathmatch`, so our SP-path hook at the bottom of `ClientBegin` never runs for DM. We call `Ultron_OnClientBegin(ent)` from **both** `ClientBegin` and `ClientBeginDeathmatch` (near the end of each).
 
-`MyMod_OnClientBegin`:
+`Ultron_OnClientBegin`:
 1. Fires `addbot` if `active_players().count < 2` (the correct command is `addbot`, not `bot_add` / `sv_addbot`).
 2. Starts the eval clock (`g_eval_start = level.time`) on first human ClientBegin.
 
@@ -116,7 +116,7 @@ Forbidden (marks us as cheating):
 
 ## Telemetry for eval harness
 
-`mymod_bot.cpp` maintains three rolling counters incremented in `MyMod_Bot_Command`:
+`ultron_bot.cpp` maintains three rolling counters incremented in `Ultron_Bot_Command`:
 - `g_fire_ticks++` — BUTTON_ATTACK set this frame.
 - `g_target_ticks++` — target in LoS this frame.
 - `g_nothing_ticks++` — no target, no memory.
@@ -126,23 +126,23 @@ Stamped to stdout every ~1 sec as `[eval] t=X score=S health=H fire_ticks=F targ
 ## Cvars
 
 **Control:**
-- `mymod_play_self` (default 1) — intercept on/off. Toggle in console to hand control back to human.
-- `mymod_autostart` (default 1) — run the DM-on-q2dm1 bootstrap in `InitGame`.
-- `mymod_eval_seconds` (default 0) — auto-quit after N seconds of human gameplay; also enables telemetry.
-- `mymod_bootstrapped` (internal, auto-set) — guards re-entry on DLL reload within one engine process.
+- `ultron_play_self` (default 1) — intercept on/off. Toggle in console to hand control back to human.
+- `ultron_autostart` (default 1) — run the DM-on-q2dm1 bootstrap in `InitGame`.
+- `ultron_eval_seconds` (default 0) — auto-quit after N seconds of human gameplay; also enables telemetry.
+- `ultron_bootstrapped` (internal, auto-set) — guards re-entry on DLL reload within one engine process.
 
 **Tuning knobs (live — no rebuild needed):**
-- `mymod_bot_fire_cone` (8.0) — fire threshold in degrees.
-- `mymod_bot_move_speed` (400) — units/sec; Q2 run speed.
-- `mymod_bot_strafe_period` (500) — ms between strafe-direction flips.
-- `mymod_bot_backpedal_dist` (200) — back away when closer than this many units.
-- `mymod_bot_memory_ms` (2000) — how long we remember a lost target.
-- `mymod_bot_no_fire` (0) — 1 disables BUTTON_ATTACK (movement-only isolation).
-- `mymod_bot_no_move` (0) — 1 zeroes forward/sidemove (aim-only isolation).
-- `mymod_bot_no_strafe` (0) — 1 disables combat strafe dodge.
-- `mymod_bot_debug` (0) — 1 emits per-decision logs at ~4 Hz.
+- `ultron_bot_fire_cone` (8.0) — fire threshold in degrees.
+- `ultron_bot_move_speed` (400) — units/sec; Q2 run speed.
+- `ultron_bot_strafe_period` (500) — ms between strafe-direction flips.
+- `ultron_bot_backpedal_dist` (200) — back away when closer than this many units.
+- `ultron_bot_memory_ms` (2000) — how long we remember a lost target.
+- `ultron_bot_no_fire` (0) — 1 disables BUTTON_ATTACK (movement-only isolation).
+- `ultron_bot_no_move` (0) — 1 zeroes forward/sidemove (aim-only isolation).
+- `ultron_bot_no_strafe` (0) — 1 disables combat strafe dodge.
+- `ultron_bot_debug` (0) — 1 emits per-decision logs at ~4 Hz.
 
-Use via `+set mymod_bot_fire_cone 3` at launch, or from `eval.bat -Cvars @{mymod_bot_fire_cone=3}`. The code reads them each frame so console changes take effect immediately.
+Use via `+set ultron_bot_fire_cone 3` at launch, or from `eval.bat -Cvars @{ultron_bot_fire_cone=3}`. The code reads them each frame so console changes take effect immediately.
 
 ## Key files and line refs
 
@@ -153,7 +153,7 @@ Use via `+set mymod_bot_fire_cone 3` at launch, or from `eval.bat -Cvars @{mymod
 | DM ClientBegin hook | `rerelease/p_client.cpp` | `ClientBeginDeathmatch` end |
 | SP ClientBegin hook | `rerelease/p_client.cpp` | `ClientBegin` before last brace |
 | Bootstrap cvars | `rerelease/g_main.cpp` | `PreInitGame` (latched), `InitGame` (non-latched + gamemap) |
-| Bot brain | `rerelease/mymod_bot.cpp` | `MyMod_Bot_Command` |
+| Bot brain | `rerelease/ultron_bot.cpp` | `Ultron_Bot_Command` |
 | LoS helper | `rerelease/g_ai.cpp` | `visible()` line 392 |
 | Aim reference | `rerelease/bots/bot_exports.cpp` | `Edict_ForceLookAtPoint` line 158 |
 | SVF_BOT gate trap | `rerelease/bots/bot_exports.cpp` | line 17 |

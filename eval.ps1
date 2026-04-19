@@ -12,8 +12,8 @@ Usage:
   eval.ps1 -Scenario noaim              # enemy bot can't aim
   eval.ps1 -Scenario hardmode           # enemy bot has perfect aim
   eval.ps1 -Runs 3                      # repeat 3x, aggregate avg
-  eval.ps1 -Cvars @{mymod_bot_fire_cone=3; mymod_bot_no_strafe=1}
-  eval.ps1 -Debug                       # enables mymod_bot_debug + bot_debugSystem
+  eval.ps1 -Cvars @{ultron_bot_fire_cone=3; ultron_bot_no_strafe=1}
+  eval.ps1 -Debug                       # enables ultron_bot_debug + bot_debugSystem
 #>
 
 [CmdletBinding()]
@@ -107,7 +107,7 @@ function Wait-AndCollect {
         $stdoutLines = Get-Content -LiteralPath $StdoutPath
     }
     $crashed = Test-Path -LiteralPath $CrashLog
-    $modLines  = $stdoutLines | Where-Object { $_ -match '\[(mymod|eval)\]' }
+    $modLines  = $stdoutLines | Where-Object { $_ -match '\[(ultron|eval)\]' }
     $evalLines = $modLines    | Where-Object { $_ -match '\[eval\]' }
     $last = $evalLines | Where-Object { $_ -match '\[eval\] t=' } | Select-Object -Last 1
 
@@ -116,7 +116,7 @@ function Wait-AndCollect {
         duration_s   = $Duration
         crashed      = $crashed
         stdout_lines = $stdoutLines.Count
-        mymod_lines  = $modLines.Count
+        ultron_lines = $modLines.Count
         eval_lines   = $evalLines.Count
         log_file     = $OutFile
     }

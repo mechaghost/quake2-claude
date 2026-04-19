@@ -6,7 +6,7 @@ setlocal
 set "STDOUT=%USERPROFILE%\Saved Games\Nightdive Studios\Quake II\stdout.txt"
 set "EXE=D:\SteamLibrary\steamapps\common\Quake 2\rerelease\quake2ex_steam.exe"
 del /q "%STDOUT%" 2>nul
-start "" "%EXE%" +set game mymod +set v_windowmode 0 +set v_width 640 +set v_height 480 +set g_showintromovie 0 +cmdlist +cvarlist +wait +quit
+start "" "%EXE%" +set game Ultron +set v_windowmode 0 +set v_width 640 +set v_height 480 +set g_showintromovie 0 +cmdlist +cvarlist +wait +quit
 powershell -NoProfile -Command "Start-Sleep -Seconds 12; Get-Process quake2ex_steam -EA SilentlyContinue | Stop-Process -Force" 2>nul
 powershell -NoProfile -Command ^
     "$f = Get-Content -LiteralPath '%STDOUT%'; ^

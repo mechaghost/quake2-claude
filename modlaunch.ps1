@@ -30,8 +30,8 @@ param(
     [int]$BotSkill  = -1,      # 0..3 (Kex range); -1 = leave default
     [ValidateSet('', 'normal','stationary','passive','noaim','deaf','instant','crippled')]
     [string]$EnemyMode = '',   # preset ablations for the engine bot
-    [switch]$DebugBot,         # enable bot_debugSystem/draw cvars + mymod_bot_debug
-    [hashtable]$Cvars = @{},   # arbitrary extra cvars: @{mymod_bot_fire_cone=3}
+    [switch]$DebugBot,         # enable bot_debugSystem/draw cvars + ultron_bot_debug
+    [hashtable]$Cvars = @{},   # arbitrary extra cvars: @{ultron_bot_fire_cone=3}
     [ValidateSet('Release','Debug')]
     [string]$Config = 'Release'
 )
@@ -134,7 +134,7 @@ if (-not $Fullscreen) {
     )
 }
 if ($EvalSeconds -gt 0) {
-    $launchArgs += @('+set','mymod_eval_seconds',"$EvalSeconds")
+    $launchArgs += @('+set','ultron_eval_seconds',"$EvalSeconds")
 }
 if ($FragLimit -gt 0) {
     $launchArgs += @('+set','fraglimit',"$FragLimit")
@@ -163,13 +163,13 @@ if ($EnemyMode -and $enemyPresets.ContainsKey($EnemyMode)) {
 
 if ($DebugBot) {
     $launchArgs += @(
-        '+set','mymod_bot_debug','1',
+        '+set','ultron_bot_debug','1',
         '+set','bot_debugSystem','1',
         '+set','con_showfps','1'
     )
 }
 
-# Arbitrary extras (e.g. @{mymod_bot_fire_cone=3; mymod_bot_no_strafe=1}).
+# Arbitrary extras (e.g. @{ultron_bot_fire_cone=3; ultron_bot_no_strafe=1}).
 foreach ($k in $Cvars.Keys) {
     $launchArgs += @('+set', "$k", "$($Cvars[$k])")
 }

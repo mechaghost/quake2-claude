@@ -2,9 +2,9 @@
 // Licensed under the GNU General Public License 2.0.
 
 #include "g_local.h"
-#include "mymod_bot.h"
+#include "ultron_bot.h"
 
-static cvar_t *mymod_autostart = nullptr;
+static cvar_t *ultron_autostart = nullptr;
 #include "bots/bot_includes.h"
 
 CHECK_GCLIENT_INTEGRITY;
@@ -180,11 +180,11 @@ void PreInitGame()
 	CTFInit();
 	// ZOID
 
-	// [mymod] Autostart: force DM before any CVAR_LATCH values are sealed
+	// [ultron] Autostart: force DM before any CVAR_LATCH values are sealed
 	// for the first map spawn. Non-latch cvars (fraglimit, g_dm_same_level,
 	// plus the gamemap + bot_add commands) go in InitGame below.
-	mymod_autostart = gi.cvar("mymod_autostart", "1", CVAR_NOFLAGS);
-	if (mymod_autostart->integer)
+	ultron_autostart = gi.cvar("ultron_autostart", "1", CVAR_NOFLAGS);
+	if (ultron_autostart->integer)
 	{
 		if (!deathmatch->integer)
 			gi.cvar_set("deathmatch", "1");
@@ -232,7 +232,7 @@ Called after PreInitGame when the game has set up cvars.
 void InitGame()
 {
 	gi.Com_Print("==== InitGame ====\n");
-	gi.Com_Print("[mymod] Hello, world! Mod DLL loaded.\n");
+	gi.Com_Print("[ultron] Hello, world! Mod DLL loaded.\n");
 
 	InitSave();
 
@@ -395,24 +395,24 @@ void InitGame()
 	game.max_lag_origins = 20 * (0.1f / gi.frame_time_s);
 	game.lag_origins = (vec3_t *) gi.TagMalloc(game.maxclients * sizeof(vec3_t) * game.max_lag_origins, TAG_GAME);
 
-	// [mymod] bot module init (registers mymod_play_self, resets state)
-	MyMod_Bot_Init();
+	// [ultron] bot module init (registers ultron_play_self, resets state)
+	Ultron_Bot_Init();
 
-	// [mymod] Bootstrap 1v1 DM on q2dm1 the very first time this DLL loads in
+	// [ultron] Bootstrap 1v1 DM on q2dm1 the very first time this DLL loads in
 	// the engine process. Guarded by a cvar (not a static bool) because the
 	// DLL can reload within one engine session and statics reset.
-	if (mymod_autostart && mymod_autostart->integer)
+	if (ultron_autostart && ultron_autostart->integer)
 	{
-		cvar_t *bootstrapped = gi.cvar("mymod_bootstrapped", "0", CVAR_NOFLAGS);
+		cvar_t *bootstrapped = gi.cvar("ultron_bootstrapped", "0", CVAR_NOFLAGS);
 		if (!bootstrapped->integer)
 		{
-			gi.cvar_set("mymod_bootstrapped", "1");
+			gi.cvar_set("ultron_bootstrapped", "1");
 			gi.cvar_set("fraglimit", "20");
 			gi.cvar_set("g_dm_same_level", "1");  // rematch stays on q2dm1
 			gi.AddCommandString("gamemap q2dm1\n");
 			// NB: bot_add is deferred to ClientBegin; calling it from here
 			// during map init crashed the engine (0xc0000005 at 0x0).
-			gi.Com_Print("[mymod] autostart: q2dm1 1v1 vs engine bot\n");
+			gi.Com_Print("[ultron] autostart: q2dm1 1v1 vs engine bot\n");
 		}
 	}
 }
