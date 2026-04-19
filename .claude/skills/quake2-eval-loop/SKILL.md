@@ -69,6 +69,19 @@ Auto-quit fires `gi.AddCommandString("quit\n")` once elapsed ≥ deadline. A fin
 6. Commit + push if the change is a clear improvement (standing auto-commit authorization on this repo).
 7. Repeat.
 
+## Controlled difficulty via Kex bot cvars
+
+See `docs/kex-vocab-guide.md`. Useful for isolating what the Claude bot struggles with:
+
+- `+set bot_aim_disabled 1` — opponent can't aim. Tests our movement + map control without incoming fire.
+- `+set bot_combatDisabled 1` — opponent doesn't fight. Pure target-tracking test.
+- `+set bot_move_disable 1` — stationary target. Tests aim precision.
+- `+set bot_senses_disabled 1` — opponent can't see us. Baseline for "how much of our damage is from stock bots' sensing".
+- `+set bot_aim_instant 1` — perfect-aim opponent. Hard mode.
+- `+set bot_followPlayer 1` — opponent chases us, good for duel practice.
+
+Pass these as launch-time overrides via `modlaunch.bat -StartMap q2dm1` followed by manual cvar set, or extend `modlaunch.ps1` with a `-BotCvars` dict param if the eval loop needs them frequently.
+
 ## Known failure modes and their signature
 
 - **target_ticks=0 for entire run** → no enemy spawned. Check the log for `addbot` success. The Kex console command is `addbot` (NOT `bot_add` or `sv_addbot`). The mod fires this from `MyMod_OnClientBegin` when `active_players().count < 2`.
