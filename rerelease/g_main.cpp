@@ -190,21 +190,6 @@ void PreInitGame()
 			gi.cvar_set("deathmatch", "1");
 		if (coop->integer)
 			gi.cvar_set("coop", "0");
-
-		// Kill every input knob that lets the user's mouse or keyboard
-		// touch the view/movement while Ultron is driving. Done here (not
-		// waiting for ClientConnect) so even the very first rendered frame
-		// has sensitivity=0 — otherwise client-side prediction reads mouse
-		// deltas before our ClientThink intercept fires.
-		gi.cvar_set("sensitivity",    "0");
-		gi.cvar_set("hsensitivity",   "0");
-		gi.cvar_set("m_pitch",        "0");
-		gi.cvar_set("m_yaw",          "0");
-		gi.cvar_set("m_side",         "0");
-		gi.cvar_set("m_forward",      "0");
-		gi.cvar_set("cl_mousesmooth", "0");
-		gi.cvar_set("freelook",       "0");
-		gi.cvar_set("g_nativeMouse",  "1");
 	}
 
 	// ZOID
@@ -413,11 +398,12 @@ void InitGame()
 	// [ultron] bot module init (registers ultron_play_self, resets state)
 	Ultron_Bot_Init();
 
-	// [ultron] Get the cursor loose once before the map even spawns.
-	// Ultron_Bot_Command re-fires this every tick for the human, but that
-	// only runs after ClientThink starts; calling here covers the early
-	// frames between map load and first human tick.
-	Ultron_FreeMouseCursor();
+	// NOTE: we used to fight the engine's mouse grab from here (and each
+	// frame in Ultron_Bot_Command). Dropped because Ultron is a full
+	// takeover — physical mouse/keyboard input can't reach the game
+	// anyway (we overwrite usercmd_t in ClientThink). Cursor may get
+	// trapped by the window; that's normal gameplay behavior and doesn't
+	// affect the bot. Alt-Tab to free it for OS work.
 
 	// [ultron] Bootstrap 1v1 DM on q2dm1 the very first time this DLL loads in
 	// the engine process. Guarded by a cvar (not a static bool) because the

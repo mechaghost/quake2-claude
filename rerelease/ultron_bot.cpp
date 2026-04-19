@@ -23,55 +23,10 @@
 #include <string>
 #include <vector>
 
-#if defined(_WIN32)
-  // Hand-declared so we don't pull all of <windows.h> (fights other game
-  // headers). These are pure Win32 user32 + kernel32 entry points.
-  extern "C" __declspec(dllimport) int   __stdcall ClipCursor(const void *rect);
-  extern "C" __declspec(dllimport) int   __stdcall ShowCursor(int show);
-  extern "C" __declspec(dllimport) void *__stdcall GetModuleHandleA(const char *name);
-  extern "C" __declspec(dllimport) void *__stdcall GetProcAddress(void *mod, const char *name);
-  using SDL_SetRelativeMouseMode_t = int (*)(int);
-  using SDL_ShowCursor_t           = int (*)(int);
-  using SDL_SetWindowGrab_t        = void (*)(void *win, int grabbed);
-#endif
-
-// Fight the engine's mouse-grab at THREE levels:
-//   1. Win32 ClipCursor(NULL)  — removes any cursor clip rect.
-//   2. Win32 ShowCursor(TRUE)  — bumps the internal visibility counter.
-//   3. SDL_SetRelativeMouseMode(SDL_FALSE) — the real root: Kex uses
-//      SDL's relative-mouse mode which internally clips + hides.
-// (3) is what actually stops the cursor from being trapped. We call all
-// three every frame because the engine re-asserts on its frame.
-void Ultron_FreeMouseCursor() {
-#if defined(_WIN32)
-    ClipCursor(nullptr);
-    for (int i = 0; i < 8; i++) {
-        if (ShowCursor(1) >= 0) break;
-    }
-
-    // Kex links against SDL2.dll (shipped next to the exe). GetModuleHandle
-    // finds the already-loaded copy without raising the ref count. Cache the
-    // resolved function pointers so we don't GetProcAddress each frame.
-    static SDL_SetRelativeMouseMode_t p_setrel  = nullptr;
-    static SDL_ShowCursor_t           p_showcur = nullptr;
-    static bool                       resolved  = false;
-    if (!resolved) {
-        resolved = true;
-        void *sdl = GetModuleHandleA("SDL2.dll");
-        if (!sdl) sdl = GetModuleHandleA("SDL2");
-        if (sdl) {
-            p_setrel  = (SDL_SetRelativeMouseMode_t)GetProcAddress(sdl, "SDL_SetRelativeMouseMode");
-            p_showcur = (SDL_ShowCursor_t)          GetProcAddress(sdl, "SDL_ShowCursor");
-            gi.Com_PrintFmt("[ultron/mouse] SDL2 resolved: setrel={} showcur={}\n",
-                            p_setrel ? 1 : 0, p_showcur ? 1 : 0);
-        } else {
-            gi.Com_Print("[ultron/mouse] SDL2.dll not found in process — can't force-release grab.\n");
-        }
-    }
-    if (p_setrel)  p_setrel(0);    // SDL_FALSE — disable relative mode
-    if (p_showcur) p_showcur(1);   // SDL_ENABLE — make cursor visible
-#endif
-}
+// (Mouse-grab wrestling removed — Ultron is a full takeover of input via
+// usercmd_t overwrite in ClientThink, so physical mouse/keyboard events
+// never reach the game. Whether the engine grabs the OS cursor is
+// irrelevant and we no longer fight it from here.)
 
 cvar_t *ultron_play_self = nullptr;
 cvar_t *ultron_eval_seconds = nullptr;
@@ -189,25 +144,15 @@ static bool                g_spawn_goal_valid  = false;
 // ---------------------------------------------------------------------------
 // Identity
 
-// Disable every knob that lets the user's mouse / keyboard touch the view
-// AND pop up the menu. Called when the human binds to Ultron. We don't
-// restore these because the bot is the point; if the user wants to play
-// normally, they flip ultron_play_self 0 and re-bind keys / re-set
-// sensitivity by hand.
+// Unbind the keys that open the main menu so accidental keypresses can't
+// steal focus from Ultron. The bot itself is fully driven by our usercmd
+// overwrite — physical mouse/keyboard events can't affect gameplay — but
+// the menu is an engine-level UI that short-circuits input, so it's worth
+// shutting down.
 static void Ultron_SuppressUserInput() {
-    gi.AddCommandString("seta sensitivity 0\n");
-    gi.AddCommandString("seta m_pitch 0\n");
-    gi.AddCommandString("seta m_yaw 0\n");
-    gi.AddCommandString("seta m_side 0\n");
-    gi.AddCommandString("seta m_forward 0\n");
-    gi.AddCommandString("seta cl_mousesmooth 0\n");
-    gi.AddCommandString("seta freelook 0\n");
-    // Unbind menu keys so Escape / F1-F10 / Tab-for-score don't pop up
-    // UI that steals input and eats the pause. Rebound at the console
-    // with `bind escape togglemenu` if you want it back.
     const char *menu_keys[] = {
         "escape", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10",
-        "f11", "f12", "mouse2"
+        "f11", "f12"
     };
     for (const char *k : menu_keys) {
         gi.AddCommandString(G_Fmt("unbind {}\n", k).data());
@@ -1478,10 +1423,6 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     // reload flips deathmatch from latched -> active; we'd otherwise see
     // Ultron walking around in SP which looks like an attract screen.
     if (!deathmatch || !deathmatch->integer) return;
-
-    // Actively fight the engine's cursor grab every frame. Cheap Win32
-    // calls; engine re-grabs on its next frame, we un-grab on this one.
-    Ultron_FreeMouseCursor();
 
     // Capture the engine-provided frametime BEFORE we overwrite ucmd, so the
     // smoothed-aim rate limit is correct at any client tick rate.

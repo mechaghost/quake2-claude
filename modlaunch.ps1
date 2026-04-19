@@ -126,69 +126,22 @@ if (-not $Fullscreen) {
     # our launch arg. Using "+seta" (set + archive) forces our value through
     # AND writes it back on exit so it stays fixed. Applied to the other
     # windowed-mode cvars for the same reason.
+    # Ultron takes input over via the game DLL's usercmd intercept, so we
+    # don't mess with mouse / keyboard input in engine configs. Just ask
+    # the engine to run in a sensible small window with no intro movie —
+    # the cursor may or may not be grabbed by the window, doesn't matter.
     $launchArgs += @(
         '+seta','v_windowmode','0',
         '+seta','v_width',  '800',
         '+seta','v_height', '600',
-        '+seta','g_showintromovie','0',
-        '+seta','g_nativeMouse','1',
-        # Kill mouse input entirely so the user's hand on the mouse never
-        # rotates the view (client-side prediction otherwise tilts the
-        # camera before the server corrects back). Ultron aims via the
-        # server's delta_angles, so zero mouse sensitivity is the clean
-        # config for demo mode.
-        '+seta','sensitivity','0',
-        '+seta','m_pitch','0',
-        '+seta','m_yaw','0',
-        '+seta','m_side','0',
-        '+seta','m_forward','0',
-        '+seta','cl_mousesmooth','0',
-        '+seta','freelook','0'
+        '+seta','g_showintromovie','0'
     )
-    # Also overwrite the persisted values directly, belt-and-suspenders, in
-    # case the engine reads these configs before the CLI queue executes.
-    # kexengine.cfg holds "seta" cvars; system.cfg holds "set" cvars
-    # including the legacy mouse multipliers (sensitivity / m_pitch / ...).
     $qiiDir = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Saved Games\Nightdive Studios\Quake II'
     $kex    = Join-Path $qiiDir 'kexengine.cfg'
-    $sys    = Join-Path $qiiDir 'system.cfg'
-
     if (Test-Path -LiteralPath $kex) {
         $txt = Get-Content -LiteralPath $kex -Raw
-        $new = $txt -replace 'seta g_nativeMouse "0"', 'seta g_nativeMouse "1"' `
-                    -replace 'seta v_windowmode "1"',  'seta v_windowmode "0"' `
-                    -replace 'seta cl_mousesmooth "1"','seta cl_mousesmooth "0"'
+        $new = $txt -replace 'seta v_windowmode "1"', 'seta v_windowmode "0"'
         if ($new -ne $txt) { Set-Content -LiteralPath $kex -Value $new -NoNewline }
-    }
-
-    # Strip menu-triggering keybinds from the mod's keybinds.cfg so
-    # Escape / F1-F10 / right-click don't summon UI and steal input.
-    $kbd = Join-Path $qiiDir "$ModName\keybinds.cfg"
-    if (Test-Path -LiteralPath $kbd) {
-        $txt = Get-Content -LiteralPath $kbd -Raw
-        # Remove any line that references togglemenu, menu_main, menu_*, etc.
-        # — those are the engine commands the escape-key binding calls.
-        $new = ($txt -split "`n" | Where-Object {
-            $_ -notmatch '(?i)(togglemenu|menu_main|menu_|score)'
-        }) -join "`n"
-        if ($new -ne $txt) {
-            Set-Content -LiteralPath $kbd -Value $new -NoNewline
-        }
-    }
-
-    # Zero the legacy mouse multipliers in system.cfg so client-side
-    # prediction never rotates the view from user input.
-    if (Test-Path -LiteralPath $sys) {
-        $txt = Get-Content -LiteralPath $sys -Raw
-        $new = $txt `
-            -replace 'set sensitivity "[^"]*"',   'set sensitivity "0"' `
-            -replace 'set hsensitivity "[^"]*"',  'set hsensitivity "0"' `
-            -replace 'set m_pitch "[^"]*"',       'set m_pitch "0"'
-        if ($new -notmatch 'set m_yaw ')      { $new += "`nset m_yaw `"0`"`n" }
-        if ($new -notmatch 'set m_side ')     { $new += "`nset m_side `"0`"`n" }
-        if ($new -notmatch 'set m_forward ')  { $new += "`nset m_forward `"0`"`n" }
-        if ($new -ne $txt) { Set-Content -LiteralPath $sys -Value $new -NoNewline }
-        Write-Host "[modlaunch] patched kex + system configs for hands-off mode" -ForegroundColor DarkGray
     }
 }
 if ($EvalSeconds -gt 0) {
