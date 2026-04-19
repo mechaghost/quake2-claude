@@ -218,3 +218,5 @@ if (-not $Quiet -and $all.Count -eq 1) {
 $json = $agg | ConvertTo-Json -Compress
 Write-Host ""
 Write-Host "JSON: $json"
+# Also to success stream so pipelines / suite scripts can capture it.
+Write-Output "JSON: $json"
