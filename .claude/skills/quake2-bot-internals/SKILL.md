@@ -8,6 +8,17 @@ tools: Read, Edit, Grep, Glob, Bash
 
 The bot lives in `rerelease/mymod_bot.cpp` / `mymod_bot.h` and hooks into three places in the stock game DLL.
 
+## Input is killed unconditionally for the human slot
+
+When `mymod_play_self=1`, `MyMod_Bot_Command` **always** runs for the human's `ClientThink` — including during intermission, respawn, dead, and spectator states. The function's first action is to zero `ucmd->buttons`, `ucmd->angles`, `ucmd->forwardmove`, `ucmd->sidemove`. This guarantees no keyboard or mouse input from the user ever reaches pmove / weapon fire / view angles.
+
+In non-combat states (intermission / respawn / deadflag / spectator), the bot pulses `BUTTON_ATTACK` on a cadence to:
+- Exit intermission (~1 pulse per 6s after `intermissiontime + 5s`).
+- Respawn (~1 pulse per 1s while `awaiting_respawn` or `deadflag`).
+- Do nothing while spectator (just the zeroed input).
+
+So the user can leave the game running fully hands-off and watch the Claude bot play indefinitely — even match-end → intermission → next map → respawn loops.
+
 ## Core design decision: intercept `usercmd_t`, don't flip SVF_BOT
 
 The human's character is driven by mutating `*ucmd` inside `ClientThink` before the engine reads it. The human's `edict_t` is **never** marked `SVF_BOT` because the engine routes `ClientThink` only to non-SVF_BOT edicts — flipping that flag silences input entirely.

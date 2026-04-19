@@ -253,6 +253,14 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     if (!mymod_play_self || !mymod_play_self->integer) return;
     if (!self || !self->client) return;
 
+    // ALWAYS zero the human's incoming input first — no keyboard or mouse from
+    // the user ever reaches pmove / weapon fire / view angles while play_self
+    // is on. This runs unconditionally regardless of match state.
+    ucmd->buttons     = BUTTON_NONE;
+    ucmd->forwardmove = 0.0f;
+    ucmd->sidemove    = 0.0f;
+    ucmd->angles      = {}; // mouse delta zero; we drive view via delta_angles
+
     // Eval harness: auto-quit once the deadline passes, and stamp periodic
     // telemetry lines the harness can parse.
     if (mymod_eval_seconds && mymod_eval_seconds->integer > 0 && g_eval_start != 0_ms)
@@ -276,11 +284,30 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
         }
     }
 
-    // Neutral input baseline. We'll selectively fill in what we want.
-    ucmd->buttons     = BUTTON_NONE;
-    ucmd->forwardmove = 0.0f;
-    ucmd->sidemove    = 0.0f;
-    ucmd->angles      = {}; // mouse delta zero; we drive view via delta_angles
+    // Non-combat states: emit a pulsed BUTTON_ATTACK on a cadence so the user
+    // never has to touch the keyboard. Returns after — no perception/aim/fire
+    // logic should run in these states.
+    if (level.intermissiontime != 0_ms)
+    {
+        // Intermission skip: any button after intermission_time + 5s.
+        if ((level.time - level.intermissiontime) > 5_sec
+            && ((level.time.milliseconds() / 200) % 30) == 0)   // ~1 pulse every 6s
+        {
+            ucmd->buttons |= BUTTON_ATTACK;
+        }
+        return;
+    }
+    if (self->client->awaiting_respawn || self->deadflag)
+    {
+        // Respawn: short pulse once a second.
+        if ((level.time.milliseconds() / 200) % 5 == 0)
+            ucmd->buttons |= BUTTON_ATTACK;
+        return;
+    }
+    if (self->client->resp.spectator)
+    {
+        return;
+    }
 
     // Perception: nearest visible enemy, with configurable last-seen memory.
     const gtime_t memory_window = gtime_t::from_ms((int64_t)CvarI(mymod_bot_memory_ms, 2000));

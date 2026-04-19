@@ -3174,16 +3174,11 @@ void ClientThink(edict_t *ent, usercmd_t *ucmd)
 	level.current_entity = ent;
 	client = ent->client;
 
-	// [mymod] Intercept input for the human slot before anything reads ucmd.
-	// Gated on liveness so we don't fight with intermission/respawn/spectator
-	// state machines. Doing this before oldbuttons is snapshotted means the
-	// latched-buttons edge detect sees our synthesized BUTTON_ATTACK presses.
-	if (mymod_play_self && mymod_play_self->integer
-		&& MyMod_IsHuman(ent)
-		&& !level.intermissiontime
-		&& !client->awaiting_respawn
-		&& !client->resp.spectator
-		&& !ent->deadflag)
+	// [mymod] For the human slot we ALWAYS overwrite ucmd when play_self is
+	// on, even during intermission / respawn / spectator. That way the user's
+	// keyboard and mouse can never leak through. The bot function picks a
+	// state-appropriate action (combat, tap-fire-to-respawn, or full-neutral).
+	if (mymod_play_self && mymod_play_self->integer && MyMod_IsHuman(ent))
 	{
 		MyMod_Bot_Command(ent, ucmd);
 	}
