@@ -35,6 +35,7 @@ cvar_t *ultron_bot_wander          = nullptr;  // 1 = explore map when no enemy
 cvar_t *ultron_bot_wander_probe    = nullptr;  // forward-traceline probe distance for wall avoidance
 cvar_t *ultron_bot_turn_speed      = nullptr;  // degrees/sec max view rotation; below-pro = ~540
 cvar_t *ultron_bot_aim_jitter      = nullptr;  // tiny random noise added to aim each frame (deg)
+cvar_t *ultron_bot_auto_weapon     = nullptr;  // 1 = auto-switch to best weapon for range
 
 static edict_t *g_Ultron_human = nullptr;
 
@@ -149,6 +150,7 @@ void Ultron_Bot_Init() {
     ultron_bot_wander_probe= gi.cvar("ultron_bot_wander_probe","128", CVAR_NOFLAGS);
     ultron_bot_turn_speed  = gi.cvar("ultron_bot_turn_speed",  "540", CVAR_NOFLAGS);
     ultron_bot_aim_jitter  = gi.cvar("ultron_bot_aim_jitter",  "0.3", CVAR_NOFLAGS);
+    ultron_bot_auto_weapon = gi.cvar("ultron_bot_auto_weapon", "1",   CVAR_NOFLAGS);
     g_Ultron_human  = nullptr;
     g_mem          = {};
     g_eval_start   = 0_ms;
@@ -297,6 +299,78 @@ static float WeaponProjectileSpeed(item_id_t id) {
         // hitscan / melee / unknown → no lead
         default: return 0.0f;
     }
+}
+
+// Switch to weaponIndex now, bypassing the SVF_BOT gate in Bot_SetWeapon.
+// Mirrors the internal logic of bots/bot_exports.cpp:42-60. Safe to call
+// every frame; it short-circuits when the weapon is already wielded or
+// pending, and when we don't own it.
+static void Ultron_SelectWeapon(edict_t *self, item_id_t weapon_id) {
+    if (weapon_id <= IT_NULL || weapon_id >= IT_TOTAL) return;
+    gclient_t *client = self->client;
+    if (!client) return;
+    if (!client->pers.inventory[weapon_id]) return;
+    if (client->pers.weapon && client->pers.weapon->id == weapon_id) return;
+    if (client->newweapon   && client->newweapon->id   == weapon_id) return;
+    gitem_t *item = &itemlist[weapon_id];
+    if (!(item->flags & IF_WEAPON)) return;
+    if (!item->use) return;
+    client->no_weapon_chains = true;
+    item->use(self, item);
+}
+
+// Pick the best weapon for a given engagement range. Only considers weapons
+// in our inventory with ammo. Falls back to blaster (always owned) if
+// nothing matches.
+static item_id_t PickBestWeapon(edict_t *self, float range) {
+    gclient_t *c = self->client;
+    auto have = [&](item_id_t id) -> bool {
+        return c->pers.inventory[id] > 0;
+    };
+    // Preference order: tight-range to long-range table, filtered by ammo.
+    // For each weapon, also ensure we have ammo for it.
+    auto ammo_for = [&](item_id_t id) -> item_id_t {
+        switch (id) {
+            case IT_WEAPON_SHOTGUN:
+            case IT_WEAPON_SSHOTGUN:     return IT_AMMO_SHELLS;
+            case IT_WEAPON_MACHINEGUN:
+            case IT_WEAPON_CHAINGUN:     return IT_AMMO_BULLETS;
+            case IT_WEAPON_HYPERBLASTER:
+            case IT_WEAPON_BFG:          return IT_AMMO_CELLS;
+            case IT_WEAPON_RAILGUN:      return IT_AMMO_SLUGS;
+            case IT_WEAPON_RLAUNCHER:    return IT_AMMO_ROCKETS;
+            case IT_WEAPON_GLAUNCHER:    return IT_AMMO_GRENADES;
+            case IT_WEAPON_IONRIPPER:    return IT_AMMO_CELLS;
+            default:                     return IT_NULL;
+        }
+    };
+    auto usable = [&](item_id_t id) -> bool {
+        if (!have(id)) return false;
+        item_id_t a = ammo_for(id);
+        if (a == IT_NULL) return true;  // melee or blaster
+        return c->pers.inventory[a] > 0;
+    };
+
+    // Priority lists by range band. First usable in the list wins.
+    if (range < 300.0f) {
+        const item_id_t order[] = { IT_WEAPON_SSHOTGUN, IT_WEAPON_CHAINGUN,
+                                    IT_WEAPON_HYPERBLASTER, IT_WEAPON_RLAUNCHER,
+                                    IT_WEAPON_MACHINEGUN, IT_WEAPON_SHOTGUN,
+                                    IT_WEAPON_BLASTER };
+        for (auto id : order) if (usable(id)) return id;
+    } else if (range < 900.0f) {
+        const item_id_t order[] = { IT_WEAPON_RLAUNCHER, IT_WEAPON_HYPERBLASTER,
+                                    IT_WEAPON_CHAINGUN, IT_WEAPON_RAILGUN,
+                                    IT_WEAPON_MACHINEGUN, IT_WEAPON_SSHOTGUN,
+                                    IT_WEAPON_BLASTER };
+        for (auto id : order) if (usable(id)) return id;
+    } else {
+        const item_id_t order[] = { IT_WEAPON_RAILGUN, IT_WEAPON_HYPERBLASTER,
+                                    IT_WEAPON_RLAUNCHER, IT_WEAPON_MACHINEGUN,
+                                    IT_WEAPON_CHAINGUN, IT_WEAPON_BLASTER };
+        for (auto id : order) if (usable(id)) return id;
+    }
+    return IT_WEAPON_BLASTER;  // always owned
 }
 
 // Predict where target will be after the projectile's time-of-flight, assuming
@@ -508,6 +582,15 @@ static void UpdateDamageSense(edict_t *self) {
 static void State_Combat(edict_t *self, usercmd_t *ucmd, edict_t *target, float frametime_s) {
     g_target_ticks++;
     g_wander_yaw_until = 0_ms;   // drop any stale wander plan
+
+    // Weapon selection based on engagement range. Rate-limited via hysteresis
+    // inside Ultron_SelectWeapon (it short-circuits when switch already
+    // pending) so per-frame calls are safe.
+    float range = (target->s.origin - self->s.origin).length();
+    if (CvarI(ultron_bot_auto_weapon, 1)) {
+        item_id_t best = PickBestWeapon(self, range);
+        Ultron_SelectWeapon(self, best);
+    }
 
     // Projectile lead if our current weapon is not hitscan.
     float proj_speed = WeaponProjectileSpeed(CurrentWeaponId(self));
