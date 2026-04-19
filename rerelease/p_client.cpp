@@ -3,6 +3,9 @@
 #include "g_local.h"
 #include "m_player.h"
 #include "bots/bot_includes.h"
+#include "mymod_bot.h"
+
+extern cvar_t *mymod_play_self;
 
 void SP_misc_teleporter_dest(edict_t *ent);
 
@@ -2906,6 +2909,10 @@ bool ClientConnect(edict_t *ent, char *userinfo, const char *social_id, bool isB
 		ent->svflags |= SVF_BOT;
 	}
 
+	// [mymod] remember which edict is the human so our usercmd intercept
+	// can target exactly one slot regardless of bot-vs-human connect order
+	MyMod_OnClientConnect(ent, isBot);
+
 	Q_strlcpy(ent->client->pers.social_id, social_id, sizeof(ent->client->pers.social_id));
 
 	if (game.maxclients > 1)
@@ -2934,6 +2941,9 @@ void ClientDisconnect(edict_t *ent)
 {
 	if (!ent->client)
 		return;
+
+	// [mymod] clear cached human identity if that slot is dropping
+	MyMod_OnClientDisconnect(ent);
 
 	// ZOID
 	CTFDeadDropFlag(ent);
@@ -3156,6 +3166,20 @@ void ClientThink(edict_t *ent, usercmd_t *ucmd)
 
 	level.current_entity = ent;
 	client = ent->client;
+
+	// [mymod] Intercept input for the human slot before anything reads ucmd.
+	// Gated on liveness so we don't fight with intermission/respawn/spectator
+	// state machines. Doing this before oldbuttons is snapshotted means the
+	// latched-buttons edge detect sees our synthesized BUTTON_ATTACK presses.
+	if (mymod_play_self && mymod_play_self->integer
+		&& MyMod_IsHuman(ent)
+		&& !level.intermissiontime
+		&& !client->awaiting_respawn
+		&& !client->resp.spectator
+		&& !ent->deadflag)
+	{
+		MyMod_Bot_Command(ent, ucmd);
+	}
 
 	// [Paril-KEX] pass buttons through even if we are in intermission or
 	// chasing.

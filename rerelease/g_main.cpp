@@ -2,6 +2,9 @@
 // Licensed under the GNU General Public License 2.0.
 
 #include "g_local.h"
+#include "mymod_bot.h"
+
+static cvar_t *mymod_autostart = nullptr;
 #include "bots/bot_includes.h"
 
 CHECK_GCLIENT_INTEGRITY;
@@ -176,6 +179,18 @@ void PreInitGame()
 	// ZOID
 	CTFInit();
 	// ZOID
+
+	// [mymod] Autostart: force DM before any CVAR_LATCH values are sealed
+	// for the first map spawn. Non-latch cvars (fraglimit, g_dm_same_level,
+	// plus the gamemap + bot_add commands) go in InitGame below.
+	mymod_autostart = gi.cvar("mymod_autostart", "1", CVAR_NOFLAGS);
+	if (mymod_autostart->integer)
+	{
+		if (!deathmatch->integer)
+			gi.cvar_set("deathmatch", "1");
+		if (coop->integer)
+			gi.cvar_set("coop", "0");
+	}
 
 	// ZOID
 	// This gamemode only supports deathmatch
@@ -379,6 +394,26 @@ void InitGame()
 	// how far back we should support lag origins for
 	game.max_lag_origins = 20 * (0.1f / gi.frame_time_s);
 	game.lag_origins = (vec3_t *) gi.TagMalloc(game.maxclients * sizeof(vec3_t) * game.max_lag_origins, TAG_GAME);
+
+	// [mymod] bot module init (registers mymod_play_self, resets state)
+	MyMod_Bot_Init();
+
+	// [mymod] Bootstrap 1v1 DM on q2dm1 the very first time this DLL loads in
+	// the engine process. Guarded by a cvar (not a static bool) because the
+	// DLL can reload within one engine session and statics reset.
+	if (mymod_autostart && mymod_autostart->integer)
+	{
+		cvar_t *bootstrapped = gi.cvar("mymod_bootstrapped", "0", CVAR_NOFLAGS);
+		if (!bootstrapped->integer)
+		{
+			gi.cvar_set("mymod_bootstrapped", "1");
+			gi.cvar_set("fraglimit", "20");
+			gi.cvar_set("g_dm_same_level", "1");  // rematch stays on q2dm1
+			gi.AddCommandString("gamemap q2dm1\n");
+			gi.AddCommandString("bot_add\n");     // 1v1: one engine bot
+			gi.Com_Print("[mymod] autostart: q2dm1 1v1 vs engine bot\n");
+		}
+	}
 }
 
 //===================================================================
