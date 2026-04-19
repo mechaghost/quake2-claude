@@ -257,6 +257,69 @@ static vec3_t AimAtPoint(edict_t *self, const vec3_t &point, float frametime_s) 
     return desired;
 }
 
+// Forward decl: defined later in the movement section.
+static void DriveMovement(edict_t *self, usercmd_t *ucmd, const vec3_t &goal_world, float face_yaw);
+
+// ---------------------------------------------------------------------------
+// Pathfinding via gi.GetPathToGoal
+
+// Cached plan so we don't re-query the engine each frame (cheap but not free).
+struct ultron_plan_t {
+    vec3_t  goal          = {};       // world-space end goal
+    vec3_t  next_waypoint = {};       // current sub-goal to walk toward
+    bool    has_plan      = false;
+    gtime_t replan_at     = 0_ms;
+};
+static ultron_plan_t g_plan;
+
+// Replan the path to 'goal' if our cached plan is stale or if goal drifted.
+// Returns true if g_plan.next_waypoint is now usable for movement.
+static bool PlanTo(edict_t *self, const vec3_t &goal) {
+    const bool goal_moved = (goal - g_plan.goal).length() > 96.0f;
+    if (g_plan.has_plan && !goal_moved && level.time < g_plan.replan_at) {
+        return true;
+    }
+
+    std::array<vec3_t, 256> points;
+    PathRequest req{};
+    req.start = self->s.origin;
+    req.goal  = goal;
+    req.moveDist = 32.0f;   // matches humanoid step granularity
+    req.pathFlags = PathFlags::All;
+    req.nodeSearch.minHeight = 64.0f;
+    req.nodeSearch.maxHeight = 64.0f;
+    req.nodeSearch.radius    = 512.0f;
+    req.pathPoints.array = points.data();
+    req.pathPoints.count = (int64_t)points.size();
+
+    PathInfo info{};
+    if (!gi.GetPathToGoal(req, info) || info.numPathPoints <= 0) {
+        g_plan.has_plan = false;
+        g_plan.replan_at = level.time + 500_ms;  // don't hammer on failure
+        return false;
+    }
+
+    // Use firstMovePoint which the engine fills for the initial step. If
+    // that is zero, fall back to the first array entry.
+    vec3_t wp = info.firstMovePoint;
+    if (wp.length() < 1.0f) wp = points[0];
+
+    g_plan.goal          = goal;
+    g_plan.next_waypoint = wp;
+    g_plan.has_plan      = true;
+    g_plan.replan_at     = level.time + 500_ms;  // re-query twice a second
+    return true;
+}
+
+// Walk toward waypoint if we have one, else toward raw goal. Useful for
+// states that know a goal but not a path: try path, fall back to line.
+static void MoveTowardGoal(edict_t *self, usercmd_t *ucmd, const vec3_t &goal, float frametime_s) {
+    vec3_t aim_point = goal + vec3_t{0, 0, 16.0f};
+    if (PlanTo(self, goal)) aim_point = g_plan.next_waypoint + vec3_t{0, 0, 16.0f};
+    vec3_t desired = AimAtPoint(self, aim_point, frametime_s);
+    DriveMovement(self, ucmd, aim_point, desired[YAW]);
+}
+
 // ---------------------------------------------------------------------------
 // Item awareness
 
@@ -670,9 +733,9 @@ static ultron_state_t DecideState(edict_t *self, edict_t *visible_enemy, bool ha
     if (have_memory) return UST_HUNT;
 
     // No enemy and no memory — consider LOOT if a valuable pickup is near.
-    // Cheap check: any LoS-reachable item in 1200u. FindBestPickup returns
-    // null if nothing good → we fall through to WANDER.
-    edict_t *pick = FindBestPickup(self, 1200.0f, true);
+    // We no longer require LoS; pathfinding in State_Loot handles occluded
+    // goals across rooms.
+    edict_t *pick = FindBestPickup(self, 1600.0f, false);
     if (pick) return UST_LOOT;
 
     return UST_WANDER;
@@ -719,23 +782,19 @@ static void State_Combat(edict_t *self, usercmd_t *ucmd, edict_t *target, float 
     }
 }
 
-// Hunt state: no visible enemy, but we have a last-seen location. Walk
-// toward it. Don't fire — no confirmed target.
+// Hunt state: no visible enemy, but we have a last-seen location. Use
+// pathfinding to navigate around corners to get eyes on them again.
 static void State_Hunt(edict_t *self, usercmd_t *ucmd, float frametime_s) {
-    vec3_t aim_point = g_mem.last_seen;
-    vec3_t desired   = AimAtPoint(self, aim_point, frametime_s);
-    DriveMovement(self, ucmd, aim_point, desired[YAW]);
+    MoveTowardGoal(self, ucmd, g_mem.last_seen, frametime_s);
 }
 
 // Heal state: low HP. Walk toward the nearest reachable health/armor. If
 // nothing in sight, run away from last damage direction and fall through
 // to wander so we at least keep moving.
 static void State_Heal(edict_t *self, usercmd_t *ucmd, float frametime_s) {
-    edict_t *heal = FindBestHealthPickup(self, 1600.0f);
+    edict_t *heal = FindBestHealthPickup(self, 2000.0f);
     if (heal) {
-        vec3_t aim_point = heal->s.origin + vec3_t{0, 0, 16.0f};
-        vec3_t desired   = AimAtPoint(self, aim_point, frametime_s);
-        DriveMovement(self, ucmd, aim_point, desired[YAW]);
+        MoveTowardGoal(self, ucmd, heal->s.origin, frametime_s);
         return;
     }
     // No heal item visible — break line with whoever hurt us last.
@@ -759,11 +818,9 @@ static void State_Heal(edict_t *self, usercmd_t *ucmd, float frametime_s) {
 // Phase 3 will replace this walk-line with real pathfinding so we can
 // cross rooms rather than just grabbing whatever happens to be in LoS.
 static void State_Loot(edict_t *self, usercmd_t *ucmd, float frametime_s) {
-    edict_t *pick = FindBestPickup(self, 1200.0f, true);
+    edict_t *pick = FindBestPickup(self, 1600.0f, false);
     if (!pick) { DriveWander(self, ucmd, frametime_s); return; }
-    vec3_t aim_point = pick->s.origin + vec3_t{0, 0, 16.0f};
-    vec3_t desired   = AimAtPoint(self, aim_point, frametime_s);
-    DriveMovement(self, ucmd, aim_point, desired[YAW]);
+    MoveTowardGoal(self, ucmd, pick->s.origin, frametime_s);
 }
 
 // Respawn / intermission button pulsers, extracted so dispatcher stays clean.
