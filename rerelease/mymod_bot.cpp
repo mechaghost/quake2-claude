@@ -78,8 +78,8 @@ void MyMod_OnClientBegin(edict_t *ent) {
     int count = 0;
     for (auto *p : active_players()) { (void)p; count++; }
     if (count < 2) {
-        gi.Com_Print("[mymod] spawning enemy bot via bot_add\n");
-        gi.AddCommandString("bot_add\n");
+        gi.Com_Print("[mymod] spawning enemy bot via addbot\n");
+        gi.AddCommandString("addbot\n");
     }
     if (g_eval_start == 0_ms) {
         g_eval_start = level.time;
