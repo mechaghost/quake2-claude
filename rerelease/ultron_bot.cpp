@@ -64,6 +64,8 @@ cvar_t *ultron_bot_wander_probe    = nullptr;  // forward-traceline probe distan
 cvar_t *ultron_bot_turn_speed      = nullptr;  // degrees/sec max view rotation; below-pro = ~540
 cvar_t *ultron_bot_aim_jitter      = nullptr;  // tiny random noise added to aim each frame (deg)
 cvar_t *ultron_bot_auto_weapon     = nullptr;  // 1 = auto-switch to best weapon for range
+cvar_t *ultron_bot_path_debug      = nullptr;  // 1 = log path + reachability decisions
+cvar_t *ultron_bot_visit_spawns    = nullptr;  // 1 = tour info_player_deathmatch points when wandering
 
 static edict_t *g_Ultron_human = nullptr;
 
@@ -147,6 +149,14 @@ static void BrainNoteItemSight(edict_t *e);
 static void BrainNoteDeath();
 static void BrainTick(edict_t *self);
 static void Ultron_ClearNavState();  // defined after g_plan/g_loot_target
+static void EnumerateSpawnPoints();   // defined after g_spawn_points
+
+// Spawn-tour state up here so ClearNavState (which lives early) can reset it.
+static std::vector<vec3_t> g_spawn_points;
+static int                 g_next_spawn_idx  = 0;
+static gtime_t             g_spawn_last_probed = 0_ms;
+static vec3_t              g_spawn_goal        = {};
+static bool                g_spawn_goal_valid  = false;
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -215,6 +225,7 @@ void Ultron_OnClientBegin(edict_t *ent) {
     // Load the map-specific brain file now that level.mapname is populated.
     if (!g_brain_loaded || g_brain.map != level.mapname) {
         LoadBrain(level.mapname);
+        EnumerateSpawnPoints();
     }
 }
 
@@ -243,6 +254,8 @@ void Ultron_Bot_Init() {
     ultron_bot_turn_speed  = gi.cvar("ultron_bot_turn_speed",  "540", CVAR_NOFLAGS);
     ultron_bot_aim_jitter  = gi.cvar("ultron_bot_aim_jitter",  "0.3", CVAR_NOFLAGS);
     ultron_bot_auto_weapon = gi.cvar("ultron_bot_auto_weapon", "1",   CVAR_NOFLAGS);
+    ultron_bot_path_debug  = gi.cvar("ultron_bot_path_debug",  "0",   CVAR_NOFLAGS);
+    ultron_bot_visit_spawns= gi.cvar("ultron_bot_visit_spawns","1",   CVAR_NOFLAGS);
     g_Ultron_human  = nullptr;
     g_mem          = {};
     g_eval_start   = 0_ms;
@@ -550,8 +563,74 @@ struct ultron_plan_t {
     int                      current_wp     = 0;
     bool                     has_plan       = false;
     gtime_t                  replan_at      = 0_ms;
+    PathLinkType             link_type      = PathLinkType::Walk;
 };
 static ultron_plan_t g_plan;
+
+// Reachability cache so we stop chasing items we can't path to.
+struct ReachEntry {
+    vec3_t  origin      = {};
+    gtime_t probed_at   = 0_ms;
+    bool    reachable   = false;
+};
+static std::vector<ReachEntry> g_reach_cache;
+
+constexpr float  REACH_EPS_DIST       = 48.0f;    // same spot = within this
+constexpr int64_t REACH_TTL_MS        = 10000;    // re-probe after 10s
+constexpr int    REACH_CACHE_MAX      = 128;     // cap size
+
+// Is there a walkable/jumpable path from self to world-space origin?
+// Cheap-ish: does a fresh GetPathToGoal query with a small waypoint
+// buffer and checks the return code. Results are cached with TTL so
+// per-frame checks don't hammer the engine.
+static bool IsReachable(edict_t *self, const vec3_t &origin) {
+    // Look up in cache first.
+    for (auto &e : g_reach_cache) {
+        if ((e.origin - origin).length() < REACH_EPS_DIST) {
+            if ((level.time - e.probed_at).milliseconds() < REACH_TTL_MS) {
+                return e.reachable;
+            }
+            e.probed_at = level.time;
+            // fall through to re-probe and update in place
+            std::array<vec3_t, 32> pts;
+            PathRequest req{};
+            req.start = self->s.origin; req.goal = origin;
+            req.moveDist = 32.0f; req.pathFlags = PathFlags::All;
+            req.nodeSearch.minHeight = 64.0f; req.nodeSearch.maxHeight = 64.0f;
+            req.nodeSearch.radius = 512.0f;
+            req.pathPoints.array = pts.data(); req.pathPoints.count = (int64_t)pts.size();
+            PathInfo info{};
+            bool ok = gi.GetPathToGoal(req, info)
+                      && info.returnCode < PathReturnCode::StartPathErrors
+                      && info.numPathPoints > 0;
+            e.reachable = ok;
+            return ok;
+        }
+    }
+
+    // Not in cache → probe and insert.
+    std::array<vec3_t, 32> pts;
+    PathRequest req{};
+    req.start = self->s.origin; req.goal = origin;
+    req.moveDist = 32.0f; req.pathFlags = PathFlags::All;
+    req.nodeSearch.minHeight = 64.0f; req.nodeSearch.maxHeight = 64.0f;
+    req.nodeSearch.radius = 512.0f;
+    req.pathPoints.array = pts.data(); req.pathPoints.count = (int64_t)pts.size();
+    PathInfo info{};
+    bool ok = gi.GetPathToGoal(req, info)
+              && info.returnCode < PathReturnCode::StartPathErrors
+              && info.numPathPoints > 0;
+
+    ReachEntry ne;
+    ne.origin    = origin;
+    ne.probed_at = level.time;
+    ne.reachable = ok;
+    if ((int)g_reach_cache.size() >= REACH_CACHE_MAX) {
+        g_reach_cache.erase(g_reach_cache.begin());  // FIFO evict
+    }
+    g_reach_cache.push_back(ne);
+    return ok;
+}
 
 constexpr float WAYPOINT_ARRIVE_DIST = 48.0f;   // advance when within this
 constexpr int64_t PLAN_TTL_MS         = 3000;    // replan every 3s
@@ -584,6 +663,7 @@ static bool PlanTo(edict_t *self, const vec3_t &goal) {
         g_plan.goal           = goal;
         g_plan.has_plan       = true;
         g_plan.replan_at      = level.time + gtime_t::from_ms(PLAN_TTL_MS);
+        g_plan.link_type      = info.pathLinkType;
     }
 
     // Advance through the path as we reach each waypoint. Leaves the
@@ -614,6 +694,8 @@ static void Ultron_ClearNavState() {
     g_plan.waypoint_count = 0;
     g_plan.current_wp = 0;
     g_loot_target = nullptr;
+    g_spawn_goal_valid = false;
+    g_reach_cache.clear();
 }
 
 // Straight-line movement toward a ground-plane goal, with no combat strafe
@@ -664,6 +746,39 @@ static void MoveTowardGoal(edict_t *self, usercmd_t *ucmd, const vec3_t &goal, f
 
     vec3_t desired = AimAtPoint(self, look_point, frametime_s);
     DriveMovementDirect(self, ucmd, walk_point, desired[YAW]);
+
+    // Press JUMP if the current path link requires jumping. Pmove
+    // handles re-pressing on landing; holding the bit between frames
+    // is fine because latched-buttons-on-press is what the engine acts on.
+    bool need_jump = false;
+    if (g_plan.has_plan) {
+        if (g_plan.link_type == PathLinkType::LongJump ||
+            g_plan.link_type == PathLinkType::BarrierJump) {
+            need_jump = true;
+            ucmd->buttons |= BUTTON_JUMP;
+        }
+    }
+
+    if (CvarI(ultron_bot_path_debug, 0)) {
+        static gtime_t last_log = 0_ms;
+        if ((level.time - last_log).seconds<float>() >= 1.0f) {
+            last_log = level.time;
+            const char *link = "walk";
+            if (g_plan.has_plan) {
+                switch (g_plan.link_type) {
+                    case PathLinkType::Walk:         link = "walk"; break;
+                    case PathLinkType::WalkOffLedge: link = "off-ledge"; break;
+                    case PathLinkType::LongJump:     link = "long-jump"; break;
+                    case PathLinkType::BarrierJump:  link = "barrier-jump"; break;
+                    case PathLinkType::Elevator:     link = "elevator"; break;
+                }
+            }
+            gi.Com_PrintFmt("[ultron/path] wp={}/{} link={} dist_goal={:.0f} jump={}\n",
+                g_plan.current_wp, g_plan.waypoint_count, link,
+                (goal - self->s.origin).length(),
+                need_jump ? 1 : 0);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -741,6 +856,10 @@ static edict_t *FindBestPickup(edict_t *self, float max_dist, bool require_los) 
             trace_t tr = gi.traceline(eye, e->s.origin + vec3_t{0, 0, 16.0f}, self, MASK_SOLID);
             if (tr.fraction < 0.99f && tr.ent != e) continue;
         }
+        // Nav-reachability filter. Skip items the engine can't plan a
+        // path to (unreachable areas, behind locked doors, etc).
+        if (!IsReachable(self, e->s.origin)) continue;
+
         // Weight / distance is the usual "value density" heuristic.
         float score = w / std::max(1.0f, d);
         if (score > best_score) {
@@ -757,7 +876,7 @@ static edict_t *FindBestHealthPickup(edict_t *self, float max_dist) {
     edict_t *best = nullptr;
     float    best_score = 0.0f;
     const int first = game.maxclients + 1;
-    for (int i = first; i < globals.num_edicts; i++) {
+    for (int i = first; i < (int)globals.num_edicts; i++) {
         edict_t *e = &g_edicts[i];
         if (!ItemIsPickupable(self, e)) continue;
         item_id_t id = e->item->id;
@@ -768,6 +887,7 @@ static edict_t *FindBestHealthPickup(edict_t *self, float max_dist) {
         if (!is_heal) continue;
         float d = (e->s.origin - self->s.origin).length();
         if (d > max_dist) continue;
+        if (!IsReachable(self, e->s.origin)) continue;
         float w = ItemWeight(self, e);
         float score = w / std::max(1.0f, d);
         if (score > best_score) { best_score = score; best = e; }
@@ -967,6 +1087,64 @@ static bool AimWithinCone(edict_t *self, const vec3_t &target_point) {
 
 // ---------------------------------------------------------------------------
 // Explore / wander
+
+// ---------------------------------------------------------------------------
+// Spawn-point tour — when wandering with no enemy / no loot, cycle through
+// info_player_deathmatch entities so Ultron actually visits every corner
+// of the map instead of random-walking. Reachability-filtered.
+
+static void EnumerateSpawnPoints() {
+    g_spawn_points.clear();
+    for (int i = 1; i < (int)globals.num_edicts; i++) {
+        edict_t *e = &g_edicts[i];
+        if (!e->classname) continue;
+        // Includes info_player_deathmatch, info_player_start, info_player_coop,
+        // info_player_team1/2/... on various maps.
+        if (strstr(e->classname, "info_player_") == nullptr) continue;
+        g_spawn_points.push_back(e->s.origin);
+    }
+    g_next_spawn_idx    = 0;
+    g_spawn_last_probed = level.time;
+    gi.Com_PrintFmt("[ultron/path] enumerated {} spawn points on {}\n",
+        g_spawn_points.size(), level.mapname);
+}
+
+// Return a REACHABLE spawn point to wander toward. Sticky — we keep the
+// same target between calls until we reach it (<= 96u), then cycle to
+// the next. Returns false if no spawn is reachable from our position.
+// (g_spawn_goal + g_spawn_goal_valid declared up with g_spawn_points.)
+static bool NextSpawnGoal(edict_t *self, vec3_t &out) {
+    if (g_spawn_points.empty()) return false;
+
+    // Advance past the current target if we've arrived.
+    if (g_spawn_goal_valid && (g_spawn_goal - self->s.origin).length() < 96.0f) {
+        g_spawn_goal_valid = false;
+    }
+
+    // Re-probe if the current target became unreachable (cache aged out).
+    if (g_spawn_goal_valid && !IsReachable(self, g_spawn_goal)) {
+        g_spawn_goal_valid = false;
+    }
+
+    if (!g_spawn_goal_valid) {
+        for (size_t tries = 0; tries < g_spawn_points.size(); tries++) {
+            int idx = g_next_spawn_idx;
+            g_next_spawn_idx = (g_next_spawn_idx + 1) % (int)g_spawn_points.size();
+            const vec3_t &p = g_spawn_points[idx];
+            if ((p - self->s.origin).length() < 64.0f) continue;
+            if (!IsReachable(self, p)) continue;
+            g_spawn_goal = p;
+            g_spawn_goal_valid = true;
+            if (CvarI(ultron_bot_path_debug, 0)) {
+                gi.Com_PrintFmt("[ultron/path] new wander goal: spawn #{} @ {}\n", idx, p);
+            }
+            break;
+        }
+    }
+    if (!g_spawn_goal_valid) return false;
+    out = g_spawn_goal;
+    return true;
+}
 
 // Simple wander: pick a yaw, walk forward, avoid walls, rotate on stuck.
 // Runs when no target is known. Exits with ucmd filled for this frame.
@@ -1192,11 +1370,48 @@ static bool LootTargetValid(edict_t *self, edict_t *e) {
     return true;
 }
 
+// Progress tracking so we can abandon loot targets we can't reach.
+static vec3_t  g_loot_progress_anchor = {};
+static gtime_t g_loot_progress_time   = 0_ms;
+static float   g_loot_progress_dist   = 0.0f;
+
 static void State_Loot(edict_t *self, usercmd_t *ucmd, float frametime_s) {
     if (!LootTargetValid(self, g_loot_target)) {
         g_loot_target = FindBestPickup(self, 1600.0f, false);
+        g_loot_progress_anchor = self->s.origin;
+        g_loot_progress_time   = level.time;
+        g_loot_progress_dist   = g_loot_target
+            ? (g_loot_target->s.origin - self->s.origin).length()
+            : 0.0f;
     }
     if (!g_loot_target) { DriveWander(self, ucmd, frametime_s); return; }
+
+    // Stuck check: if we've been trying for >3s and haven't closed at least
+    // 64u of distance to the goal, write off this item as unreachable.
+    if ((level.time - g_loot_progress_time).seconds<float>() > 3.0f) {
+        float now_dist = (g_loot_target->s.origin - self->s.origin).length();
+        if (g_loot_progress_dist - now_dist < 64.0f) {
+            // Poison the reachability cache so we don't pick this again.
+            for (auto &e : g_reach_cache) {
+                if ((e.origin - g_loot_target->s.origin).length() < REACH_EPS_DIST) {
+                    e.reachable = false;
+                    e.probed_at = level.time;
+                    break;
+                }
+            }
+            gi.Com_PrintFmt("[ultron/path] abandoning stuck loot target: {} at {}\n",
+                g_loot_target->classname ? g_loot_target->classname : "?",
+                g_loot_target->s.origin);
+            g_loot_target = nullptr;
+            DriveWander(self, ucmd, frametime_s);
+            return;
+        }
+        // Made progress — reset the window.
+        g_loot_progress_anchor = self->s.origin;
+        g_loot_progress_time   = level.time;
+        g_loot_progress_dist   = now_dist;
+    }
+
     MoveTowardGoal(self, ucmd, g_loot_target->s.origin, frametime_s);
 }
 
@@ -1295,11 +1510,17 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
         case UST_HUNT:         State_Hunt(self, ucmd, frametime_s);         break;
         case UST_HEAL:         State_Heal(self, ucmd, frametime_s);         break;
         case UST_LOOT:         State_Loot(self, ucmd, frametime_s);         break;
-        case UST_WANDER:
+        case UST_WANDER: {
             g_nothing_ticks++;
-            if (CvarI(ultron_bot_wander, 1))
+            vec3_t spawn_goal;
+            if (CvarI(ultron_bot_visit_spawns, 1) && NextSpawnGoal(self, spawn_goal)) {
+                // Tour the map by pathing from one reachable spawn to the next.
+                MoveTowardGoal(self, ucmd, spawn_goal, frametime_s);
+            } else if (CvarI(ultron_bot_wander, 1)) {
                 DriveWander(self, ucmd, frametime_s);
+            }
             break;
+        }
     }
 
     // Verbose per-frame dev log. Rate-limit to ~4 Hz.
