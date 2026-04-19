@@ -161,6 +161,21 @@ if (-not $Fullscreen) {
         if ($new -ne $txt) { Set-Content -LiteralPath $kex -Value $new -NoNewline }
     }
 
+    # Strip menu-triggering keybinds from the mod's keybinds.cfg so
+    # Escape / F1-F10 / right-click don't summon UI and steal input.
+    $kbd = Join-Path $qiiDir "$ModName\keybinds.cfg"
+    if (Test-Path -LiteralPath $kbd) {
+        $txt = Get-Content -LiteralPath $kbd -Raw
+        # Remove any line that references togglemenu, menu_main, menu_*, etc.
+        # — those are the engine commands the escape-key binding calls.
+        $new = ($txt -split "`n" | Where-Object {
+            $_ -notmatch '(?i)(togglemenu|menu_main|menu_|score)'
+        }) -join "`n"
+        if ($new -ne $txt) {
+            Set-Content -LiteralPath $kbd -Value $new -NoNewline
+        }
+    }
+
     # Zero the legacy mouse multipliers in system.cfg so client-side
     # prediction never rotates the view from user input.
     if (Test-Path -LiteralPath $sys) {
