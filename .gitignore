@@ -1,0 +1,26 @@
+# Claude Code local state
+.claude/
+
+# MSBuild / Visual Studio intermediates
+rerelease/x64/
+rerelease/Debug/
+rerelease/Release/
+rerelease/.vs/
+*.user
+*.suo
+*.aps
+*.vcxproj.bak
+
+# vcpkg manifest install output
+rerelease/vcpkg_installed/
+
+# build outputs
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.idb
+*.tlog
+*.log
+*.recipe
