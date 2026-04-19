@@ -23,6 +23,8 @@ param(
     [switch]$NoLaunch,
     [switch]$Clean,
     [switch]$WithIntro,        # default: skip intros by passing +map on launch
+    [switch]$Fullscreen,       # default: windowed (no mouse grab)
+    [int]$EvalSeconds = 0,     # if >0, mod auto-quits after N seconds
     [string]$StartMap = 'q2dm1',
     [ValidateSet('Release','Debug')]
     [string]$Config = 'Release'
@@ -107,6 +109,21 @@ if (-not $WithIntro) {
     # Kex skips the studio/logo intros when a map is specified on the CLI.
     # We also pre-seal deathmatch=1 so the first map load is DM, not SP.
     $launchArgs += @('+set','deathmatch','1','+map',$StartMap)
+}
+if (-not $Fullscreen) {
+    # Kex exposes several fullscreen cvars; set all the common ones so
+    # whichever the engine actually honors, we stay windowed and release
+    # the mouse grab.
+    $launchArgs += @(
+        '+set','r_fullscreen','0',
+        '+set','r_windowmode','0',
+        '+set','vid_fullscreen','0',
+        '+set','r_width',  '1280',
+        '+set','r_height', '720'
+    )
+}
+if ($EvalSeconds -gt 0) {
+    $launchArgs += @('+set','mymod_eval_seconds',"$EvalSeconds")
 }
 Write-Host "Launching: quake2ex_steam.exe $($launchArgs -join ' ')" -ForegroundColor Cyan
 Start-Process -FilePath $Engine -ArgumentList $launchArgs

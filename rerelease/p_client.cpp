@@ -2356,6 +2356,10 @@ void ClientBeginDeathmatch(edict_t *ent)
 
 	// make sure all view stuff is valid
 	ClientEndServerFrame(ent);
+
+	// [mymod] DM-path hook: ClientBegin returns early for DM so our hook
+	// in the SP branch below never fires for DM clients.
+	MyMod_OnClientBegin(ent);
 }
 
 static void G_SetLevelEntry()

@@ -18,8 +18,21 @@
 #include "mymod_bot.h"
 
 cvar_t *mymod_play_self = nullptr;
+cvar_t *mymod_eval_seconds = nullptr;
 
 static edict_t *g_mymod_human = nullptr;
+
+// Wall-clock start for the eval harness, captured on the human's first
+// ClientBegin. Used to auto-quit after mymod_eval_seconds and to stamp the
+// [eval] telemetry lines.
+static gtime_t g_eval_start  = 0_ms;
+static gtime_t g_last_telem  = 0_ms;
+static bool    g_quit_issued = false;
+
+// Rolling counters so the harness can see the bot is actually doing things.
+static uint32_t g_fire_ticks     = 0;  // ticks we held BUTTON_ATTACK
+static uint32_t g_target_ticks   = 0;  // ticks we had a visible enemy
+static uint32_t g_nothing_ticks  = 0;  // ticks with no target and no memory
 
 // Per-human memory of the last-seen enemy position.
 struct bot_memory_t {
@@ -68,6 +81,10 @@ void MyMod_OnClientBegin(edict_t *ent) {
         gi.Com_Print("[mymod] spawning enemy bot via bot_add\n");
         gi.AddCommandString("bot_add\n");
     }
+    if (g_eval_start == 0_ms) {
+        g_eval_start = level.time;
+        gi.Com_PrintFmt("[eval] start t={}\n", level.time.milliseconds());
+    }
 }
 
 bool MyMod_IsHuman(edict_t *ent) {
@@ -78,9 +95,14 @@ bool MyMod_IsHuman(edict_t *ent) {
 // Init
 
 void MyMod_Bot_Init() {
-    mymod_play_self = gi.cvar("mymod_play_self", "1", CVAR_NOFLAGS);
-    g_mymod_human = nullptr;
-    g_mem = {};
+    mymod_play_self    = gi.cvar("mymod_play_self",    "1", CVAR_NOFLAGS);
+    mymod_eval_seconds = gi.cvar("mymod_eval_seconds", "0", CVAR_NOFLAGS);
+    g_mymod_human  = nullptr;
+    g_mem          = {};
+    g_eval_start   = 0_ms;
+    g_last_telem   = 0_ms;
+    g_quit_issued  = false;
+    g_fire_ticks = g_target_ticks = g_nothing_ticks = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +217,29 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     if (!mymod_play_self || !mymod_play_self->integer) return;
     if (!self || !self->client) return;
 
+    // Eval harness: auto-quit once the deadline passes, and stamp periodic
+    // telemetry lines the harness can parse.
+    if (mymod_eval_seconds && mymod_eval_seconds->integer > 0 && g_eval_start != 0_ms)
+    {
+        float elapsed = (level.time - g_eval_start).seconds<float>();
+        if (!g_quit_issued && elapsed >= (float)mymod_eval_seconds->integer)
+        {
+            g_quit_issued = true;
+            gi.Com_PrintFmt("[eval] done elapsed={:.2f} score={} health={} fire_ticks={} target_ticks={} idle_ticks={}\n",
+                elapsed, self->client->resp.score, self->health,
+                g_fire_ticks, g_target_ticks, g_nothing_ticks);
+            gi.AddCommandString("quit\n");
+            return;
+        }
+        if ((level.time - g_last_telem).seconds<float>() >= 1.0f)
+        {
+            g_last_telem = level.time;
+            gi.Com_PrintFmt("[eval] t={:.1f} score={} health={} fire_ticks={} target_ticks={} idle_ticks={}\n",
+                elapsed, self->client->resp.score, self->health,
+                g_fire_ticks, g_target_ticks, g_nothing_ticks);
+        }
+    }
+
     // Neutral input baseline. We'll selectively fill in what we want.
     ucmd->buttons     = BUTTON_NONE;
     ucmd->forwardmove = 0.0f;
@@ -225,9 +270,11 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     }
 
     if (!have_aim) {
+        g_nothing_ticks++;
         // No target, no memory — stand still. MVP: no wandering/patrol.
         return;
     }
+    if (target) g_target_ticks++;
 
     vec3_t desired = AimAtPoint(self, aim_point);
 
@@ -237,5 +284,6 @@ void MyMod_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     // Fire only when we actually see the target AND our view is near it.
     if (target && AimWithinCone(self, aim_point)) {
         ucmd->buttons |= BUTTON_ATTACK;
+        g_fire_ticks++;
     }
 }
