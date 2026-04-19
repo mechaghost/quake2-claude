@@ -16,6 +16,12 @@
 
 #include "g_local.h"
 #include "ultron_bot.h"
+#include "json/json.h"
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
 
 cvar_t *ultron_play_self = nullptr;
 cvar_t *ultron_eval_seconds = nullptr;
@@ -91,6 +97,35 @@ static inline float  CvarF(cvar_t *cv, float  def) { return cv ? cv->value : def
 static inline int64_t CvarI(cvar_t *cv, int64_t def) { return cv ? cv->integer : def; }
 
 // ---------------------------------------------------------------------------
+// Brain state (declared up here because Ultron_On* callbacks touch it).
+// Function definitions live further down in the "Persistent brain" section.
+
+struct UltronItemMemory {
+    std::string classname;
+    vec3_t      origin       = {};
+    int         seen_count   = 0;
+};
+struct UltronBrain {
+    std::string                   map;
+    int                           games_played = 0;
+    int                           total_frags  = 0;
+    int                           total_deaths = 0;
+    int                           total_shots  = 0;
+    std::vector<UltronItemMemory> items;
+};
+static UltronBrain g_brain;
+static gtime_t     g_brain_last_save = 0_ms;
+static bool        g_brain_loaded    = false;
+static int32_t     g_last_score_seen = 0;
+static bool        g_counted_this_game = false;
+
+static void SaveBrain();
+static void LoadBrain(const char *mapname);
+static void BrainNoteItemSight(edict_t *e);
+static void BrainNoteDeath();
+static void BrainTick(edict_t *self);
+
+// ---------------------------------------------------------------------------
 // Identity
 
 void Ultron_OnClientConnect(edict_t *ent, bool isBot) {
@@ -102,10 +137,12 @@ void Ultron_OnClientConnect(edict_t *ent, bool isBot) {
 
 void Ultron_OnClientDisconnect(edict_t *ent) {
     if (ent == g_Ultron_human) {
+        SaveBrain();
         g_Ultron_human = nullptr;
         g_mem = {};
         g_aim_init = false;
         g_wander_yaw_until = 0_ms;
+        g_counted_this_game = false;  // next bind on new map starts a new game count
         gi.Com_Print("[ultron] human disconnected; identity cleared\n");
     }
     // Also drop any target we'd memorized pointing at a disconnecting edict.
@@ -135,6 +172,10 @@ void Ultron_OnClientBegin(edict_t *ent) {
         g_eval_start = level.time;
         gi.Com_PrintFmt("[eval] start t={} deathmatch={}\n",
             level.time.milliseconds(), deathmatch->integer);
+    }
+    // Load the map-specific brain file now that level.mapname is populated.
+    if (!g_brain_loaded || g_brain.map != level.mapname) {
+        LoadBrain(level.mapname);
     }
 }
 
@@ -306,6 +347,157 @@ static vec3_t AimAtPoint(edict_t *self, const vec3_t &point, float frametime_s) 
 static void DriveMovement(edict_t *self, usercmd_t *ucmd, const vec3_t &goal_world, float face_yaw);
 
 // ---------------------------------------------------------------------------
+// Persistent brain (per-map JSON file)
+//
+// Each map gets its own file at:
+//   %USERPROFILE%\Saved Games\Nightdive Studios\Quake II\Ultron\brain\<map>.json
+//
+// The brain grows every match we play on the map: games, total frags,
+// deaths, and observed item positions (with sighting counts). This is the
+// scaffolding for the "Ultron gets stronger the more he plays" feature;
+// downstream phases will mine it for priors (hot items at match start,
+// tactical positions, etc).
+
+static std::string BrainDir() {
+    const char *up = std::getenv("USERPROFILE");
+    std::string base = up ? up : ".";
+    std::filesystem::path p = std::filesystem::path(base) / "Saved Games" / "Nightdive Studios" / "Quake II" / "Ultron" / "brain";
+    std::error_code ec;
+    std::filesystem::create_directories(p, ec);
+    return p.string();
+}
+
+static std::string BrainPath(const std::string &map) {
+    return (std::filesystem::path(BrainDir()) / (map + ".json")).string();
+}
+
+static void LoadBrain(const char *mapname) {
+    g_brain = {};
+    g_brain.map = mapname ? mapname : "unknown";
+    g_brain_loaded = true;
+    g_counted_this_game = false;
+
+    std::string path = BrainPath(g_brain.map);
+    std::ifstream f(path);
+    if (!f.good()) {
+        gi.Com_PrintFmt("[ultron/brain] fresh file: {}\n", path);
+        return;
+    }
+
+    Json::Value root;
+    Json::CharReaderBuilder rb;
+    std::string errs;
+    if (!Json::parseFromStream(rb, f, &root, &errs)) {
+        gi.Com_PrintFmt("[ultron/brain] parse failed for {}: {}\n", path, errs);
+        return;
+    }
+
+    g_brain.games_played = root.get("games_played", 0).asInt();
+    g_brain.total_frags  = root.get("total_frags",  0).asInt();
+    g_brain.total_deaths = root.get("total_deaths", 0).asInt();
+    g_brain.total_shots  = root.get("total_shots",  0).asInt();
+
+    for (const auto &it : root["items"]) {
+        UltronItemMemory m;
+        m.classname  = it.get("classname", "").asString();
+        m.origin[0]  = it.get("x", 0.0f).asFloat();
+        m.origin[1]  = it.get("y", 0.0f).asFloat();
+        m.origin[2]  = it.get("z", 0.0f).asFloat();
+        m.seen_count = it.get("seen_count", 0).asInt();
+        g_brain.items.push_back(m);
+    }
+
+    gi.Com_PrintFmt("[ultron/brain] loaded: map={} games={} frags={} deaths={} items={}\n",
+        g_brain.map, g_brain.games_played, g_brain.total_frags,
+        g_brain.total_deaths, (int)g_brain.items.size());
+}
+
+static void SaveBrain() {
+    if (!g_brain_loaded || g_brain.map.empty()) return;
+
+    Json::Value root;
+    root["map"]          = g_brain.map;
+    root["games_played"] = g_brain.games_played;
+    root["total_frags"]  = g_brain.total_frags;
+    root["total_deaths"] = g_brain.total_deaths;
+    root["total_shots"]  = g_brain.total_shots;
+
+    Json::Value items(Json::arrayValue);
+    for (const auto &m : g_brain.items) {
+        Json::Value it;
+        it["classname"]  = m.classname;
+        it["x"]          = m.origin[0];
+        it["y"]          = m.origin[1];
+        it["z"]          = m.origin[2];
+        it["seen_count"] = m.seen_count;
+        items.append(it);
+    }
+    root["items"] = items;
+
+    Json::StreamWriterBuilder wb;
+    wb["indentation"] = "  ";
+    std::ofstream f(BrainPath(g_brain.map));
+    if (!f.good()) return;
+    f << Json::writeString(wb, root);
+    g_brain_last_save = level.time;
+}
+
+// Call when we see an item on the map (via FindBestPickup scan). Adds
+// a new entry if we haven't recorded this classname at this position
+// yet, otherwise bumps the sighting count.
+static void BrainNoteItemSight(edict_t *e) {
+    if (!g_brain_loaded) return;
+    if (!e || !e->item || !e->classname) return;
+    for (auto &m : g_brain.items) {
+        if (m.classname == e->classname &&
+            (m.origin - e->s.origin).length() < 64.0f) {
+            m.seen_count++;
+            return;
+        }
+    }
+    UltronItemMemory m;
+    m.classname  = e->classname;
+    m.origin     = e->s.origin;
+    m.seen_count = 1;
+    g_brain.items.push_back(m);
+}
+
+// Per-frame brain updater: bumps games_played once per match, totals
+// frags/deaths from score deltas and deadflag transitions, saves every
+// 30 seconds of wall time.
+static void BrainTick(edict_t *self) {
+    if (!g_brain_loaded) return;
+
+    if (!g_counted_this_game) {
+        g_brain.games_played++;
+        g_counted_this_game = true;
+        g_last_score_seen = self->client->resp.score;
+        gi.Com_PrintFmt("[ultron/brain] game #{} on {} (lifetime frags={} deaths={})\n",
+            g_brain.games_played, g_brain.map,
+            g_brain.total_frags, g_brain.total_deaths);
+    }
+
+    // Score deltas -> frag count.
+    int32_t now_score = self->client->resp.score;
+    if (now_score > g_last_score_seen) {
+        g_brain.total_frags += (now_score - g_last_score_seen);
+    }
+    g_last_score_seen = now_score;
+
+    // Periodic save to survive crashes.
+    if ((level.time - g_brain_last_save).seconds<float>() >= 30.0f) {
+        SaveBrain();
+    }
+}
+
+// Death transition — incremented from UpdateDamageSense which already
+// tracks health across frames. Called from there.
+static void BrainNoteDeath() {
+    if (!g_brain_loaded) return;
+    g_brain.total_deaths++;
+}
+
+// ---------------------------------------------------------------------------
 // Pathfinding via gi.GetPathToGoal
 
 // Cached plan so we don't re-query the engine each frame (cheap but not free).
@@ -427,9 +619,10 @@ static edict_t *FindBestPickup(edict_t *self, float max_dist, bool require_los) 
     edict_t *best = nullptr;
     float    best_score = 0.0f;
     const int first = game.maxclients + 1;  // skip player edicts
-    for (int i = first; i < globals.num_edicts; i++) {
+    for (int i = first; i < (int)globals.num_edicts; i++) {
         edict_t *e = &g_edicts[i];
         if (!ItemIsPickupable(self, e)) continue;
+        BrainNoteItemSight(e);  // feed the brain's map knowledge
         float w = ItemWeight(self, e);
         if (w <= 0.0f) continue;
         float d = (e->s.origin - self->s.origin).length();
@@ -798,6 +991,11 @@ static void UpdateDamageSense(edict_t *self) {
         g_damage_from = self->client->damage_from;
         g_damage_at   = level.time;
     }
+    // Death transition: health just dropped to <= 0. Count it once.
+    static bool was_dead = false;
+    bool is_dead = (self->health <= 0) || self->deadflag;
+    if (is_dead && !was_dead) BrainNoteDeath();
+    was_dead = is_dead;
     g_last_health = self->health;
 }
 
@@ -939,9 +1137,10 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
         }
     }
 
-    // Refresh damage-sense + hearing before state handlers run.
+    // Refresh damage-sense + hearing + brain tick before state handlers run.
     UpdateDamageSense(self);
     UpdateHearing(self);
+    BrainTick(self);
 
     // Perception: nearest visible enemy, with configurable last-seen memory.
     const gtime_t memory_window = gtime_t::from_ms((int64_t)CvarI(ultron_bot_memory_ms, 2000));
