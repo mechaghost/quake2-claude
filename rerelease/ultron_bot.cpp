@@ -66,11 +66,16 @@ static float g_cur_yaw   = 0.0f;
 static float g_cur_pitch = 0.0f;
 static bool  g_aim_init  = false;
 
-// Per-human memory of the last-seen enemy position.
+// Per-human memory of the last-seen enemy position + augmented senses.
 struct bot_memory_t {
-    edict_t *target     = nullptr;
-    vec3_t   last_seen  = {};
-    gtime_t  last_seen_at = 0_ms;
+    edict_t *target        = nullptr;
+    vec3_t   last_seen     = {};
+    vec3_t   last_seen_vel = {};    // velocity at last sight — used for extrapolation
+    gtime_t  last_seen_at  = 0_ms;
+
+    // Hearing proxy: any nearby enemy footstep / teleport event we detected.
+    vec3_t   heard_at      = {};
+    gtime_t  heard_at_time = 0_ms;
 };
 static bot_memory_t g_mem;
 
@@ -116,13 +121,20 @@ void Ultron_OnClientBegin(edict_t *ent) {
     if (!deathmatch || !deathmatch->integer) return;
     int count = 0;
     for (auto *p : active_players()) { (void)p; count++; }
-    if (count < 2) {
+    // Guard against spawning another bot when one already exists in the match.
+    // Each Ultron_OnClientBegin fires once per map load for the human; on the
+    // second map load (autostart reload) the first bot has already connected.
+    static gtime_t last_addbot_at = 0_ms;
+    if (count < 2 && (last_addbot_at == 0_ms ||
+                      (level.time - last_addbot_at).seconds<float>() > 3.0f)) {
         gi.Com_Print("[ultron] spawning enemy bot via addbot\n");
         gi.AddCommandString("addbot\n");
+        last_addbot_at = level.time;
     }
     if (g_eval_start == 0_ms) {
         g_eval_start = level.time;
-        gi.Com_PrintFmt("[eval] start t={}\n", level.time.milliseconds());
+        gi.Com_PrintFmt("[eval] start t={} deathmatch={}\n",
+            level.time.milliseconds(), deathmatch->integer);
     }
 }
 
@@ -187,6 +199,39 @@ static edict_t *FindVisibleEnemy(edict_t *self) {
         }
     }
     return best;
+}
+
+// Hearing proxy. Scan other clients for audible events (footstep, teleport)
+// within 'radius' units. Stamps g_mem.heard_at when we catch one. This is
+// intentionally cheap — O(maxclients) per frame.
+static void UpdateHearing(edict_t *self) {
+    const float radius = 1500.0f;
+    const float radius2 = radius * radius;
+    for (auto *other : active_players()) {
+        if (other == self) continue;
+        if (!other->inuse || other->deadflag) continue;
+        if (!other->client || other->client->resp.spectator) continue;
+        if (other->s.event != EV_FOOTSTEP &&
+            other->s.event != EV_OTHER_FOOTSTEP &&
+            other->s.event != EV_PLAYER_TELEPORT &&
+            other->s.event != EV_FALL &&
+            other->s.event != EV_FALLSHORT &&
+            other->s.event != EV_FALLFAR) continue;
+        float d2 = (other->s.origin - self->s.origin).lengthSquared();
+        if (d2 > radius2) continue;
+        g_mem.heard_at      = other->s.origin;
+        g_mem.heard_at_time = level.time;
+    }
+}
+
+// Trajectory-extrapolate the last-seen origin using captured velocity.
+// Used by State_Hunt to "lead" the chase around corners, so Ultron rounds
+// the corner where the enemy actually is rather than where they stood.
+static vec3_t ExtrapolateLastSeen() {
+    if (g_mem.last_seen_at == 0_ms) return g_mem.last_seen;
+    float t = (level.time - g_mem.last_seen_at).seconds<float>();
+    t = std::clamp(t, 0.0f, 1.0f);  // only extrapolate for 1s max
+    return g_mem.last_seen + g_mem.last_seen_vel * t;
 }
 
 // ---------------------------------------------------------------------------
@@ -719,7 +764,8 @@ static const char *StateName(ultron_state_t s) {
     return "?";
 }
 
-static ultron_state_t DecideState(edict_t *self, edict_t *visible_enemy, bool have_memory) {
+static ultron_state_t DecideState(edict_t *self, edict_t *visible_enemy,
+                                  bool have_memory, bool heard_recently) {
     if (level.intermissiontime != 0_ms)      return UST_INTERMISSION;
     if (self->deadflag || self->client->awaiting_respawn) return UST_RESPAWN;
     if (self->client->resp.spectator)        return UST_SPECTATOR;
@@ -731,6 +777,7 @@ static ultron_state_t DecideState(edict_t *self, edict_t *visible_enemy, bool ha
         return UST_COMBAT;
     }
     if (have_memory) return UST_HUNT;
+    if (heard_recently) return UST_HUNT;  // converge on the sound
 
     // No enemy and no memory — consider LOOT if a valuable pickup is near.
     // We no longer require LoS; pathfinding in State_Loot handles occluded
@@ -782,10 +829,18 @@ static void State_Combat(edict_t *self, usercmd_t *ucmd, edict_t *target, float 
     }
 }
 
-// Hunt state: no visible enemy, but we have a last-seen location. Use
-// pathfinding to navigate around corners to get eyes on them again.
+// Hunt state: no visible enemy. Prefer the trajectory-extrapolated memory
+// position when we have a recent sighting; otherwise fall back to the most
+// recent "heard at" hint from UpdateHearing.
 static void State_Hunt(edict_t *self, usercmd_t *ucmd, float frametime_s) {
-    MoveTowardGoal(self, ucmd, g_mem.last_seen, frametime_s);
+    vec3_t goal;
+    if (g_mem.last_seen_at != 0_ms &&
+        (level.time - g_mem.last_seen_at).seconds<float>() < 3.0f) {
+        goal = ExtrapolateLastSeen();
+    } else {
+        goal = g_mem.heard_at;
+    }
+    MoveTowardGoal(self, ucmd, goal, frametime_s);
 }
 
 // Heal state: low HP. Walk toward the nearest reachable health/armor. If
@@ -842,6 +897,11 @@ static void State_Respawn(edict_t *self, usercmd_t *ucmd) {
 void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     if (!ultron_play_self || !ultron_play_self->integer) return;
     if (!self || !self->client) return;
+    // Don't drive during a single-player session. The engine can briefly
+    // boot into SP on the first frame before the autostart's gamemap
+    // reload flips deathmatch from latched -> active; we'd otherwise see
+    // Ultron walking around in SP which looks like an attract screen.
+    if (!deathmatch || !deathmatch->integer) return;
 
     // Capture the engine-provided frametime BEFORE we overwrite ucmd, so the
     // smoothed-aim rate limit is correct at any client tick rate.
@@ -879,8 +939,9 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
         }
     }
 
-    // Refresh damage-sense before any state handler runs so HEAL can use it.
+    // Refresh damage-sense + hearing before state handlers run.
     UpdateDamageSense(self);
+    UpdateHearing(self);
 
     // Perception: nearest visible enemy, with configurable last-seen memory.
     const gtime_t memory_window = gtime_t::from_ms((int64_t)CvarI(ultron_bot_memory_ms, 2000));
@@ -888,13 +949,16 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     if (vis) {
         g_mem.target       = vis;
         g_mem.last_seen    = EyePos(vis);
+        g_mem.last_seen_vel= vis->velocity;
         g_mem.last_seen_at = level.time;
     } else if (g_mem.target && (level.time - g_mem.last_seen_at) > memory_window) {
         g_mem.target = nullptr;
     }
     bool have_memory = (g_mem.target != nullptr);
+    bool heard_recently = (g_mem.heard_at_time != 0_ms &&
+                           (level.time - g_mem.heard_at_time).seconds<float>() < 2.0f);
 
-    ultron_state_t state = DecideState(self, vis, have_memory);
+    ultron_state_t state = DecideState(self, vis, have_memory, heard_recently);
 
     switch (state) {
         case UST_INTERMISSION: State_Intermission(self, ucmd); return;

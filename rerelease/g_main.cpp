@@ -407,12 +407,15 @@ void InitGame()
 		if (!bootstrapped->integer)
 		{
 			gi.cvar_set("ultron_bootstrapped", "1");
-			gi.cvar_set("fraglimit", "20");
-			gi.cvar_set("g_dm_same_level", "1");  // rematch stays on q2dm1
+			gi.cvar_set("deathmatch",      "1");
+			gi.cvar_set("coop",            "0");
+			gi.cvar_set("fraglimit",       "20");
+			gi.cvar_set("g_dm_same_level", "1");
 			gi.AddCommandString("gamemap q2dm1\n");
 			// NB: bot_add is deferred to ClientBegin; calling it from here
 			// during map init crashed the engine (0xc0000005 at 0x0).
-			gi.Com_Print("[ultron] autostart: q2dm1 1v1 vs engine bot\n");
+			gi.Com_PrintFmt("[ultron] autostart: q2dm1 1v1 (deathmatch={} coop={} fraglimit={})\n",
+				deathmatch->integer, coop->integer, fraglimit->integer);
 		}
 	}
 }

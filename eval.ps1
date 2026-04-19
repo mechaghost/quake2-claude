@@ -111,10 +111,22 @@ function Wait-AndCollect {
     $evalLines = $modLines    | Where-Object { $_ -match '\[eval\]' }
     $last = $evalLines | Where-Object { $_ -match '\[eval\] t=' } | Select-Object -Last 1
 
+    # DM-mode sanity: the autostart banner now includes "deathmatch=1" when
+    # the engine is actually in DM. Also require an enemy "connected." line
+    # with a non-Mechaghost name.
+    $dmBanner   = ($stdoutLines | Where-Object { $_ -match '\[ultron\] autostart: .*deathmatch=1' }).Count -gt 0
+    $evalStart  = ($stdoutLines | Where-Object { $_ -match '\[eval\] start .* deathmatch=1' }).Count -gt 0
+    # Bot names can contain spaces (e.g. "The Makron"), so match up to
+    # " connected." at end of line.
+    $enemyCnxn  = @($stdoutLines | Where-Object { $_ -match ' connected\.\s*$' -and $_ -notmatch '^Mechaghost connected' }).Count
+    $dmValid    = ($dmBanner -or $evalStart) -and ($enemyCnxn -ge 1)
+
     $stats = [ordered]@{
         scenario     = $Scenario
         duration_s   = $Duration
         crashed      = $crashed
+        dm_valid     = $dmValid
+        enemy_count  = $enemyCnxn
         stdout_lines = $stdoutLines.Count
         ultron_lines = $modLines.Count
         eval_lines   = $evalLines.Count
@@ -148,19 +160,20 @@ for ($i = 1; $i -le $Runs; $i++) {
 # --- per-run table ---------------------------------------------------------
 Write-Host ""
 Write-Host "=== eval summary (scenario=$Scenario, runs=$Runs) ===" -ForegroundColor Green
-$fmt = '{0,-4} {1,-6} {2,-7} {3,-7} {4,-7} {5,-6} {6,-6} {7}'
-Write-Host ($fmt -f 'run','score','health','fire','target','idle','t','log')
+$fmt = '{0,-4} {1,-3} {2,-6} {3,-7} {4,-7} {5,-7} {6,-6} {7,-6} {8}'
+Write-Host ($fmt -f 'run','dm','score','health','fire','target','idle','t','log')
 $runIdx = 0
 foreach ($r in $all) {
     $runIdx++
     $s = $r.stats
+    $dm     = if ($s['dm_valid']) { 'OK' } else { 'NO' }
     $score  = if ($s.Contains('last_score'))  { $s['last_score']  } else { '?' }
     $health = if ($s.Contains('last_health')) { $s['last_health'] } else { '?' }
     $fire   = if ($s.Contains('fire_ticks'))  { $s['fire_ticks']  } else { '?' }
     $target = if ($s.Contains('target_ticks')){ $s['target_ticks']} else { '?' }
     $idle   = if ($s.Contains('idle_ticks'))  { $s['idle_ticks']  } else { '?' }
     $t      = if ($s.Contains('last_t'))      { $s['last_t']      } else { '?' }
-    Write-Host ($fmt -f $runIdx,$score,$health,$fire,$target,$idle,$t,(Split-Path -Leaf $s.log_file))
+    Write-Host ($fmt -f $runIdx,$dm,$score,$health,$fire,$target,$idle,$t,(Split-Path -Leaf $s.log_file))
 }
 
 # --- aggregate -------------------------------------------------------------
@@ -170,18 +183,20 @@ $healths = @($all | ForEach-Object { $_.stats['last_health'] } | Where-Object { 
 $fires   = @($all | ForEach-Object { $_.stats['fire_ticks']  } | Where-Object { $_ -ne $null })
 $targets = @($all | ForEach-Object { $_.stats['target_ticks']} | Where-Object { $_ -ne $null })
 $idles   = @($all | ForEach-Object { $_.stats['idle_ticks']  } | Where-Object { $_ -ne $null })
-$crashCount = @($all | Where-Object { $_.crashed }).Count
+$crashCount   = @($all | Where-Object { $_.crashed }).Count
+$dmBadCount   = @($all | Where-Object { -not $_.stats['dm_valid'] }).Count
 
 $agg = [ordered]@{
-    scenario   = $Scenario
-    runs       = $Runs
-    duration   = $Duration
-    avg_score  = [math]::Round((MeanOf $scores),  2)
-    avg_health = [math]::Round((MeanOf $healths), 1)
-    avg_fire   = [math]::Round((MeanOf $fires),   0)
-    avg_target = [math]::Round((MeanOf $targets), 0)
-    avg_idle   = [math]::Round((MeanOf $idles),   0)
-    crashes    = $crashCount
+    scenario     = $Scenario
+    runs         = $Runs
+    duration     = $Duration
+    dm_invalid   = $dmBadCount
+    avg_score    = [math]::Round((MeanOf $scores),  2)
+    avg_health   = [math]::Round((MeanOf $healths), 1)
+    avg_fire     = [math]::Round((MeanOf $fires),   0)
+    avg_target   = [math]::Round((MeanOf $targets), 0)
+    avg_idle     = [math]::Round((MeanOf $idles),   0)
+    crashes      = $crashCount
 }
 
 Write-Host ""
