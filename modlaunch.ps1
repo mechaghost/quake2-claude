@@ -111,15 +111,16 @@ if (-not $WithIntro) {
     $launchArgs += @('+set','deathmatch','1','+map',$StartMap)
 }
 if (-not $Fullscreen) {
-    # Kex exposes several fullscreen cvars; set all the common ones so
-    # whichever the engine actually honors, we stay windowed and release
-    # the mouse grab.
+    # Kex uses v_* cvars for video. v_windowmode: 0=windowed, 1=fullscreen
+    # (confirmed by reading the user's kexengine.cfg). Small dev window so
+    # the mouse is free and we can see the console / editor alongside.
     $launchArgs += @(
-        '+set','r_fullscreen','0',
-        '+set','r_windowmode','0',
-        '+set','vid_fullscreen','0',
-        '+set','r_width',  '1280',
-        '+set','r_height', '720'
+        '+set','v_windowmode','0',
+        '+set','v_width',  '800',
+        '+set','v_height', '600',
+        # Also kill the intro movie properly (this cvar is observed in the
+        # engine's saved config, so it's a real one).
+        '+set','g_showintromovie','0'
     )
 }
 if ($EvalSeconds -gt 0) {
