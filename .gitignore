@@ -1,5 +1,10 @@
-# Claude Code local state
-.claude/
+# Claude Code state: ignore personal/volatile things, keep project skills
+.claude/*
+!.claude/skills/
+.claude/settings.local.json
+.claude/sessions/
+.claude/todos/
+.claude/backups/
 
 # MSBuild / Visual Studio intermediates
 rerelease/x64/
