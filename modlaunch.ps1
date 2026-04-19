@@ -118,20 +118,33 @@ if (-not $WithIntro) {
 }
 if (-not $Fullscreen) {
     # Kex uses v_* cvars for video. v_windowmode: 0=windowed, 1=fullscreen
-    # (confirmed by reading the user's kexengine.cfg). Small dev window so
-    # the mouse is free and we can see the console / editor alongside.
-    # g_nativeMouse=1 switches to the OS cursor so it's not captured by the
-    # engine in windowed mode. in_nograb=1 is a Quake-convention fallback in
-    # case the build honors it. The bot drives the view via delta_angles so
-    # we don't need mouse input at all.
+    # (confirmed from kexengine.cfg). Small dev window so the mouse is free
+    # and we can see the console / editor alongside.
+    #
+    # IMPORTANT: kexengine.cfg is loaded AFTER CLI "+set" commands, so a
+    # previously-persisted g_nativeMouse=0 would re-trap the mouse despite
+    # our launch arg. Using "+seta" (set + archive) forces our value through
+    # AND writes it back on exit so it stays fixed. Applied to the other
+    # windowed-mode cvars for the same reason.
     $launchArgs += @(
-        '+set','v_windowmode','0',
-        '+set','v_width',  '800',
-        '+set','v_height', '600',
-        '+set','g_showintromovie','0',
-        '+set','g_nativeMouse','1',
-        '+set','in_nograb','1'
+        '+seta','v_windowmode','0',
+        '+seta','v_width',  '800',
+        '+seta','v_height', '600',
+        '+seta','g_showintromovie','0',
+        '+seta','g_nativeMouse','1'
     )
+    # Also overwrite the persisted value directly, belt-and-suspenders, in
+    # case the engine reads kexengine.cfg before the CLI queue executes.
+    $cfg = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Saved Games\Nightdive Studios\Quake II\kexengine.cfg'
+    if (Test-Path -LiteralPath $cfg) {
+        $txt = Get-Content -LiteralPath $cfg -Raw
+        $new = $txt -replace 'seta g_nativeMouse "0"', 'seta g_nativeMouse "1"' `
+                    -replace 'seta v_windowmode "1"',  'seta v_windowmode "0"'
+        if ($new -ne $txt) {
+            Set-Content -LiteralPath $cfg -Value $new -NoNewline
+            Write-Host "[modlaunch] patched kexengine.cfg: g_nativeMouse=1, v_windowmode=0" -ForegroundColor DarkGray
+        }
+    }
 }
 if ($EvalSeconds -gt 0) {
     $launchArgs += @('+set','ultron_eval_seconds',"$EvalSeconds")
