@@ -145,17 +145,35 @@ if (-not $Fullscreen) {
         '+seta','cl_mousesmooth','0',
         '+seta','freelook','0'
     )
-    # Also overwrite the persisted value directly, belt-and-suspenders, in
-    # case the engine reads kexengine.cfg before the CLI queue executes.
-    $cfg = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Saved Games\Nightdive Studios\Quake II\kexengine.cfg'
-    if (Test-Path -LiteralPath $cfg) {
-        $txt = Get-Content -LiteralPath $cfg -Raw
+    # Also overwrite the persisted values directly, belt-and-suspenders, in
+    # case the engine reads these configs before the CLI queue executes.
+    # kexengine.cfg holds "seta" cvars; system.cfg holds "set" cvars
+    # including the legacy mouse multipliers (sensitivity / m_pitch / ...).
+    $qiiDir = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Saved Games\Nightdive Studios\Quake II'
+    $kex    = Join-Path $qiiDir 'kexengine.cfg'
+    $sys    = Join-Path $qiiDir 'system.cfg'
+
+    if (Test-Path -LiteralPath $kex) {
+        $txt = Get-Content -LiteralPath $kex -Raw
         $new = $txt -replace 'seta g_nativeMouse "0"', 'seta g_nativeMouse "1"' `
-                    -replace 'seta v_windowmode "1"',  'seta v_windowmode "0"'
-        if ($new -ne $txt) {
-            Set-Content -LiteralPath $cfg -Value $new -NoNewline
-            Write-Host "[modlaunch] patched kexengine.cfg: g_nativeMouse=1, v_windowmode=0" -ForegroundColor DarkGray
-        }
+                    -replace 'seta v_windowmode "1"',  'seta v_windowmode "0"' `
+                    -replace 'seta cl_mousesmooth "1"','seta cl_mousesmooth "0"'
+        if ($new -ne $txt) { Set-Content -LiteralPath $kex -Value $new -NoNewline }
+    }
+
+    # Zero the legacy mouse multipliers in system.cfg so client-side
+    # prediction never rotates the view from user input.
+    if (Test-Path -LiteralPath $sys) {
+        $txt = Get-Content -LiteralPath $sys -Raw
+        $new = $txt `
+            -replace 'set sensitivity "[^"]*"',   'set sensitivity "0"' `
+            -replace 'set hsensitivity "[^"]*"',  'set hsensitivity "0"' `
+            -replace 'set m_pitch "[^"]*"',       'set m_pitch "0"'
+        if ($new -notmatch 'set m_yaw ')      { $new += "`nset m_yaw `"0`"`n" }
+        if ($new -notmatch 'set m_side ')     { $new += "`nset m_side `"0`"`n" }
+        if ($new -notmatch 'set m_forward ')  { $new += "`nset m_forward `"0`"`n" }
+        if ($new -ne $txt) { Set-Content -LiteralPath $sys -Value $new -NoNewline }
+        Write-Host "[modlaunch] patched kex + system configs for hands-off mode" -ForegroundColor DarkGray
     }
 }
 if ($EvalSeconds -gt 0) {
