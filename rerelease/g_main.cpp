@@ -217,6 +217,7 @@ Called after PreInitGame when the game has set up cvars.
 void InitGame()
 {
 	gi.Com_Print("==== InitGame ====\n");
+	gi.Com_Print("[mymod] Hello, world! Mod DLL loaded.\n");
 
 	InitSave();
 

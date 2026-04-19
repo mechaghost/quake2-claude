@@ -62,9 +62,12 @@ function Invoke-Build {
     New-Item -ItemType Directory -Force -Path $ModDir | Out-Null
     $env:VCPKG_ROOT = $VcpkgRoot
     Write-Host "Building '$ModName' [$Config] -> $ModDir" -ForegroundColor Cyan
-    $intDir = Join-Path $SrcDir "x64\$Config\"
+    # MSBuild wants OutDir/IntDir to end with a separator, but a trailing backslash
+    # before the closing quote escapes the quote in cmd.exe. Use forward slashes.
+    $outArg = ($ModDir -replace '\\','/') + '/'
+    $intArg = ((Join-Path $SrcDir "x64\$Config") -replace '\\','/') + '/'
     & $MSBuild $Sln -m -nologo -v:minimal "-p:Configuration=$Config" -p:Platform=x64 `
-        -p:VcpkgEnableManifest=true "-p:OutDir=$ModDir\" "-p:IntDir=$intDir"
+        -p:VcpkgEnableManifest=true "-p:OutDir=$outArg" "-p:IntDir=$intArg"
     if ($LASTEXITCODE -ne 0) { throw "Build failed (exit $LASTEXITCODE)" }
 }
 

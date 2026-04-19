@@ -2520,6 +2520,9 @@ void ClientBegin(edict_t *ent)
 		// send effect if in a multiplayer game
 		if (game.maxclients > 1 && !(ent->svflags & SVF_NOCLIENT))
 			gi.LocBroadcast_Print(PRINT_HIGH, "$g_entered_game", ent->client->pers.netname);
+
+		// [mymod] hello-world greeting
+		gi.LocCenter_Print(ent, "Hello, world!\nWelcome to mymod.");
 	}
 
 	level.coop_scale_players++;
