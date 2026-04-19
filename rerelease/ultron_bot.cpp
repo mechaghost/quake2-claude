@@ -585,13 +585,47 @@ static bool PlanTo(edict_t *self, const vec3_t &goal) {
     return true;
 }
 
+// Straight-line movement toward a ground-plane goal, with no combat strafe
+// or back-pedal. Used by HUNT/LOOT/HEAL where we want Ultron to actually
+// reach the waypoint instead of dancing around it.
+static void DriveMovementDirect(edict_t *self, usercmd_t *ucmd, const vec3_t &goal_world, float face_yaw) {
+    if (CvarI(ultron_bot_no_move, 0)) { ucmd->forwardmove = ucmd->sidemove = 0.0f; return; }
+
+    const float speed = CvarF(ultron_bot_move_speed, DEFAULT_MOVE_SPEED);
+
+    vec3_t wd = goal_world - self->s.origin;
+    wd[2] = 0.0f;
+    if (wd.length() < 8.0f) { ucmd->forwardmove = ucmd->sidemove = 0.0f; return; }
+    wd.normalize();
+
+    vec3_t fwd, rt;
+    AngleVectors(vec3_t{ 0.0f, face_yaw, 0.0f }, fwd, rt, nullptr);
+
+    ucmd->forwardmove = std::clamp(wd.dot(fwd) * speed, -speed, speed);
+    ucmd->sidemove    = std::clamp(wd.dot(rt)  * speed, -speed, speed);
+}
+
 // Walk toward waypoint if we have one, else toward raw goal. Useful for
 // states that know a goal but not a path: try path, fall back to line.
+// Picks the aim target intelligently: if the current waypoint is close
+// (<128u) we look toward the FINAL goal instead so the camera doesn't
+// jerk around every short path step.
 static void MoveTowardGoal(edict_t *self, usercmd_t *ucmd, const vec3_t &goal, float frametime_s) {
-    vec3_t aim_point = goal + vec3_t{0, 0, 16.0f};
-    if (PlanTo(self, goal)) aim_point = g_plan.next_waypoint + vec3_t{0, 0, 16.0f};
-    vec3_t desired = AimAtPoint(self, aim_point, frametime_s);
-    DriveMovement(self, ucmd, aim_point, desired[YAW]);
+    vec3_t walk_point = goal;
+    vec3_t look_point = goal;
+    if (PlanTo(self, goal)) {
+        walk_point = g_plan.next_waypoint;
+        float dist_to_wp = (walk_point - self->s.origin).length();
+        // If the waypoint is very close, aim at the final goal so our
+        // view is on "where we're going" rather than the step in front
+        // of our feet.
+        look_point = (dist_to_wp < 128.0f) ? goal : walk_point;
+    }
+    walk_point[2] += 16.0f;
+    look_point[2] += 16.0f;
+
+    vec3_t desired = AimAtPoint(self, look_point, frametime_s);
+    DriveMovementDirect(self, ucmd, walk_point, desired[YAW]);
 }
 
 // ---------------------------------------------------------------------------
