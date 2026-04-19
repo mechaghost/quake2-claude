@@ -23,6 +23,28 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+  // Hand-declared rather than pulling in all of <windows.h> (which fights
+  // with other game headers). These are pure Win32 user32 entry points.
+  extern "C" __declspec(dllimport) int __stdcall ClipCursor(const void *rect);
+  extern "C" __declspec(dllimport) int __stdcall ShowCursor(int show);
+#endif
+
+// Fight the engine's mouse-grab. Win32-only, silently no-ops elsewhere.
+// The Kex engine calls SDL_SetRelativeMouseMode during gameplay which
+// clips the OS cursor to the window (via ClipCursor on Windows) and hides
+// it. We unclip + reshow it every frame. Cheap, effective.
+void Ultron_FreeMouseCursor() {
+#if defined(_WIN32)
+    ClipCursor(nullptr);
+    // ShowCursor uses an internal counter; loop until visible (>= 0 means
+    // "cursor is shown"). Most frames this is a single call.
+    for (int i = 0; i < 8; i++) {
+        if (ShowCursor(1) >= 0) break;
+    }
+#endif
+}
+
 cvar_t *ultron_play_self = nullptr;
 cvar_t *ultron_eval_seconds = nullptr;
 
@@ -1115,6 +1137,10 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     // reload flips deathmatch from latched -> active; we'd otherwise see
     // Ultron walking around in SP which looks like an attract screen.
     if (!deathmatch || !deathmatch->integer) return;
+
+    // Actively fight the engine's cursor grab every frame. Cheap Win32
+    // calls; engine re-grabs on its next frame, we un-grab on this one.
+    Ultron_FreeMouseCursor();
 
     // Capture the engine-provided frametime BEFORE we overwrite ucmd, so the
     // smoothed-aim rate limit is correct at any client tick rate.

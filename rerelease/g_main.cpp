@@ -413,6 +413,12 @@ void InitGame()
 	// [ultron] bot module init (registers ultron_play_self, resets state)
 	Ultron_Bot_Init();
 
+	// [ultron] Get the cursor loose once before the map even spawns.
+	// Ultron_Bot_Command re-fires this every tick for the human, but that
+	// only runs after ClientThink starts; calling here covers the early
+	// frames between map load and first human tick.
+	Ultron_FreeMouseCursor();
+
 	// [ultron] Bootstrap 1v1 DM on q2dm1 the very first time this DLL loads in
 	// the engine process. Guarded by a cvar (not a static bool) because the
 	// DLL can reload within one engine session and statics reset.

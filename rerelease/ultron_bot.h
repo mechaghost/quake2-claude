@@ -20,3 +20,7 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd);
 
 // Called from InitGame to register ultron_play_self cvar and reset per-game state.
 void Ultron_Bot_Init();
+
+// Win32 ClipCursor(NULL) + ShowCursor(TRUE) so the engine can't trap the
+// cursor. No-op on non-Windows. Call from anywhere; cheap.
+void Ultron_FreeMouseCursor();
