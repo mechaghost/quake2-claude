@@ -51,6 +51,23 @@ void MyMod_OnClientDisconnect(edict_t *ent) {
         g_mem = {};
         gi.Com_Print("[mymod] human disconnected; identity cleared\n");
     }
+    // Also drop any target we'd memorized pointing at a disconnecting edict.
+    if (ent == g_mem.target) g_mem.target = nullptr;
+}
+
+// Fire bot_add once the human is fully in the level. Firing bot_add from
+// InitGame crashed the engine (access violation at 0x0 inside the engine
+// while mid-map-init). Deferring to ClientBegin avoids that.
+void MyMod_OnClientBegin(edict_t *ent) {
+    if (!ent || !ent->client) return;
+    if (ent->svflags & SVF_BOT) return;           // only trigger off the human
+    if (!deathmatch || !deathmatch->integer) return;
+    int count = 0;
+    for (auto *p : active_players()) { (void)p; count++; }
+    if (count < 2) {
+        gi.Com_Print("[mymod] spawning enemy bot via bot_add\n");
+        gi.AddCommandString("bot_add\n");
+    }
 }
 
 bool MyMod_IsHuman(edict_t *ent) {

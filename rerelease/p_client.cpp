@@ -2528,6 +2528,9 @@ void ClientBegin(edict_t *ent)
 		gi.LocCenter_Print(ent, "Hello, world!\nWelcome to mymod.");
 	}
 
+	// [mymod] fire deferred bot_add once the human is fully spawned in
+	MyMod_OnClientBegin(ent);
+
 	level.coop_scale_players++;
 	G_Monster_CheckCoopHealthScaling();
 

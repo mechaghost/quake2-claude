@@ -8,6 +8,7 @@ struct usercmd_t;
 // Called from ClientConnect / ClientDisconnect to track which edict is the
 // human. g_edicts[1] isn't reliable when bots race the human for slot 1.
 void MyMod_OnClientConnect(edict_t *ent, bool isBot);
+void MyMod_OnClientBegin(edict_t *ent);
 void MyMod_OnClientDisconnect(edict_t *ent);
 bool MyMod_IsHuman(edict_t *ent);
 

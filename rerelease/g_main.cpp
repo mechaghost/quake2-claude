@@ -410,7 +410,8 @@ void InitGame()
 			gi.cvar_set("fraglimit", "20");
 			gi.cvar_set("g_dm_same_level", "1");  // rematch stays on q2dm1
 			gi.AddCommandString("gamemap q2dm1\n");
-			gi.AddCommandString("bot_add\n");     // 1v1: one engine bot
+			// NB: bot_add is deferred to ClientBegin; calling it from here
+			// during map init crashed the engine (0xc0000005 at 0x0).
 			gi.Com_Print("[mymod] autostart: q2dm1 1v1 vs engine bot\n");
 		}
 	}

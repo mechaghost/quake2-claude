@@ -22,6 +22,8 @@ param(
     [switch]$NoBuild,
     [switch]$NoLaunch,
     [switch]$Clean,
+    [switch]$WithIntro,        # default: skip intros by passing +map on launch
+    [string]$StartMap = 'q2dm1',
     [ValidateSet('Release','Debug')]
     [string]$Config = 'Release'
 )
@@ -100,5 +102,11 @@ if ($NoLaunch) { exit 0 }
 if (-not (Test-Path -LiteralPath $Engine))  { throw "Engine not found at $Engine" }
 if (-not (Test-Path -LiteralPath $DllPath)) { throw "No DLL at $DllPath - build first." }
 
-Write-Host "Launching: quake2ex_steam.exe +set game $ModName" -ForegroundColor Cyan
-Start-Process -FilePath $Engine -ArgumentList @('+set','game',$ModName)
+$launchArgs = @('+set','game',$ModName)
+if (-not $WithIntro) {
+    # Kex skips the studio/logo intros when a map is specified on the CLI.
+    # We also pre-seal deathmatch=1 so the first map load is DM, not SP.
+    $launchArgs += @('+set','deathmatch','1','+map',$StartMap)
+}
+Write-Host "Launching: quake2ex_steam.exe $($launchArgs -join ' ')" -ForegroundColor Cyan
+Start-Process -FilePath $Engine -ArgumentList $launchArgs
