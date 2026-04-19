@@ -31,6 +31,8 @@ cvar_t *ultron_bot_no_fire         = nullptr;  // 1 = never press BUTTON_ATTACK
 cvar_t *ultron_bot_no_move         = nullptr;  // 1 = zero out forward/side
 cvar_t *ultron_bot_no_strafe       = nullptr;  // 1 = don't auto-strafe during combat
 cvar_t *ultron_bot_debug           = nullptr;  // 1 = emit verbose per-decision logs
+cvar_t *ultron_bot_wander          = nullptr;  // 1 = explore map when no enemy
+cvar_t *ultron_bot_wander_probe    = nullptr;  // forward-traceline probe distance for wall avoidance
 
 static edict_t *g_Ultron_human = nullptr;
 
@@ -45,6 +47,14 @@ static bool    g_quit_issued = false;
 static uint32_t g_fire_ticks     = 0;  // ticks we held BUTTON_ATTACK
 static uint32_t g_target_ticks   = 0;  // ticks we had a visible enemy
 static uint32_t g_nothing_ticks  = 0;  // ticks with no target and no memory
+
+// Wander/exploration state. When no target is visible and no memory to
+// pursue, the bot roams the map with wall-avoidance and periodic yaw changes.
+static float   g_wander_yaw       = 0.0f;
+static gtime_t g_wander_yaw_until = 0_ms;
+static vec3_t  g_last_pos         = {};
+static gtime_t g_last_pos_check   = 0_ms;
+static gtime_t g_stuck_since      = 0_ms;
 
 // Per-human memory of the last-seen enemy position.
 struct bot_memory_t {
@@ -123,12 +133,19 @@ void Ultron_Bot_Init() {
     ultron_bot_no_move     = gi.cvar("ultron_bot_no_move",     "0",   CVAR_NOFLAGS);
     ultron_bot_no_strafe   = gi.cvar("ultron_bot_no_strafe",   "0",   CVAR_NOFLAGS);
     ultron_bot_debug       = gi.cvar("ultron_bot_debug",       "0",   CVAR_NOFLAGS);
+    ultron_bot_wander      = gi.cvar("ultron_bot_wander",      "1",   CVAR_NOFLAGS);
+    ultron_bot_wander_probe= gi.cvar("ultron_bot_wander_probe","128", CVAR_NOFLAGS);
     g_Ultron_human  = nullptr;
     g_mem          = {};
     g_eval_start   = 0_ms;
     g_last_telem   = 0_ms;
     g_quit_issued  = false;
     g_fire_ticks = g_target_ticks = g_nothing_ticks = 0;
+    g_wander_yaw = 0.0f;
+    g_wander_yaw_until = 0_ms;
+    g_last_pos = {};
+    g_last_pos_check = 0_ms;
+    g_stuck_since = 0_ms;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +264,89 @@ static bool AimWithinCone(edict_t *self, const vec3_t &target_point) {
 }
 
 // ---------------------------------------------------------------------------
+// Explore / wander
+
+// Aim the camera at 'yaw' degrees (ground plane). Used by both combat and
+// wander. Mirrors the Edict_ForceLookAtPoint pattern.
+static void SetAimYawPitch(edict_t *self, float yaw, float pitch) {
+    vec3_t desired = { pitch, yaw, 0.0f };
+    self->client->ps.pmove.delta_angles = desired - self->client->resp.cmd_angles;
+    self->client->ps.viewangles = desired;
+    self->client->v_angle       = desired;
+    self->s.angles              = { 0.0f, yaw, 0.0f };
+}
+
+// Simple wander: pick a yaw, walk forward, avoid walls, rotate on stuck.
+// Runs when no target is known. Exits with ucmd filled for this frame.
+static void DriveWander(edict_t *self, usercmd_t *ucmd) {
+    const float speed = CvarF(ultron_bot_move_speed, DEFAULT_MOVE_SPEED);
+    const float probe = CvarF(ultron_bot_wander_probe, 128.0f);
+
+    // Initialize on first entry — face whichever way we're currently looking.
+    if (g_wander_yaw_until == 0_ms) {
+        g_wander_yaw = self->client->v_angle[YAW];
+        g_wander_yaw_until = level.time + gtime_t::from_ms(1500 + (int64_t)frandom(2500.0f));
+        g_last_pos = self->s.origin;
+        g_last_pos_check = level.time;
+    }
+
+    bool pick_new = false;
+
+    // Wall probe: traceline forward at eye height. If something blocks within
+    // the probe distance, we need to turn.
+    {
+        vec3_t eye = EyePos(self);
+        vec3_t fwd;
+        AngleVectors(vec3_t{ 0.0f, g_wander_yaw, 0.0f }, fwd, nullptr, nullptr);
+        vec3_t probe_end = eye + fwd * probe;
+        trace_t tr = gi.traceline(eye, probe_end, self, MASK_SOLID);
+        if (tr.fraction < 0.9f) pick_new = true;
+    }
+
+    // Timed refresh — even if the path is clear, human-like movement has some
+    // zig-zag rather than barreling straight.
+    if (level.time >= g_wander_yaw_until) pick_new = true;
+
+    // Stuck detection: sample position every 500ms; if we've moved <24 units
+    // for >= 1 second straight, we're stuck on geometry — force a turn.
+    if ((level.time - g_last_pos_check).seconds<float>() >= 0.5f) {
+        g_last_pos_check = level.time;
+        float moved = (self->s.origin - g_last_pos).length();
+        g_last_pos = self->s.origin;
+        if (moved < 24.0f) {
+            if (g_stuck_since == 0_ms) g_stuck_since = level.time;
+            else if ((level.time - g_stuck_since).seconds<float>() >= 1.0f) {
+                pick_new = true;
+                g_stuck_since = 0_ms;
+            }
+        } else {
+            g_stuck_since = 0_ms;
+        }
+    }
+
+    if (pick_new) {
+        // Pick a random yaw delta in the range [30, 165] degrees with random
+        // sign. Magnitude is enough to dodge walls without spinning in place.
+        float sign  = (frandom() < 0.5f) ? -1.0f : 1.0f;
+        float delta = frandom(30.0f, 165.0f);
+        g_wander_yaw = anglemod(g_wander_yaw + sign * delta);
+        g_wander_yaw_until = level.time + gtime_t::from_ms(1200 + (int64_t)frandom(2800.0f));
+    }
+
+    // Aim where we're walking (with a slight downward tilt so we don't stare at the ceiling).
+    SetAimYawPitch(self, g_wander_yaw, 0.0f);
+
+    // Forward at full speed; no strafe during exploration.
+    ucmd->forwardmove = speed;
+    ucmd->sidemove    = 0.0f;
+
+    // Occasional jump to break pathing on stairs.
+    if (frandom() < 0.01f) {
+        ucmd->buttons |= BUTTON_JUMP;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level
 
 void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
@@ -335,9 +435,17 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
 
     if (!have_aim) {
         g_nothing_ticks++;
-        // No target, no memory — stand still. MVP: no wandering/patrol.
+        // No target, no memory — wander the map (was: stand still). Gated on
+        // ultron_bot_wander so a tuning pass can disable for A/B.
+        if (CvarI(ultron_bot_wander, 1)) {
+            DriveWander(self, ucmd);
+        }
         return;
     }
+    // Fresh visible target invalidates the wander plan; next time we lose
+    // sight we want a fresh random yaw, not the stale one from last wander.
+    g_wander_yaw_until = 0_ms;
+    g_stuck_since      = 0_ms;
     if (target) g_target_ticks++;
 
     vec3_t desired = AimAtPoint(self, aim_point);
