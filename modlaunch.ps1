@@ -36,7 +36,7 @@ $ModDir    = Join-Path ([Environment]::GetFolderPath('UserProfile')) "Saved Game
 $DllPath   = Join-Path $ModDir 'game_x64.dll'
 $Engine    = 'D:\SteamLibrary\steamapps\common\Quake 2\rerelease\quake2ex_steam.exe'
 $MSBuild   = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe'
-$VcpkgRoot = 'C:\dev\vcpkg'
+$VcpkgRoot = 'D:\dev\vcpkg'
 
 function Get-NewestSource {
     Get-ChildItem -LiteralPath $SrcDir -Recurse -File -ErrorAction SilentlyContinue |
