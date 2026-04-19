@@ -128,9 +128,24 @@ static void BrainTick(edict_t *self);
 // ---------------------------------------------------------------------------
 // Identity
 
+// Disable every knob that lets the user's mouse / keyboard touch the view.
+// Called when the human binds to Ultron. We don't restore these because the
+// bot is the point; if the user wants to play normally, they flip
+// ultron_play_self 0 and manually re-set sensitivity.
+static void Ultron_SuppressUserInput() {
+    gi.AddCommandString("seta sensitivity 0\n");
+    gi.AddCommandString("seta m_pitch 0\n");
+    gi.AddCommandString("seta m_yaw 0\n");
+    gi.AddCommandString("seta m_side 0\n");
+    gi.AddCommandString("seta m_forward 0\n");
+    gi.AddCommandString("seta cl_mousesmooth 0\n");
+    gi.AddCommandString("seta freelook 0\n");
+}
+
 void Ultron_OnClientConnect(edict_t *ent, bool isBot) {
     if (!isBot && !g_Ultron_human) {
         g_Ultron_human = ent;
+        Ultron_SuppressUserInput();
         gi.Com_PrintFmt("[ultron] human bound to client slot {}\n", ent->s.number);
     }
 }

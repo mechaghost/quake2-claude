@@ -131,7 +131,19 @@ if (-not $Fullscreen) {
         '+seta','v_width',  '800',
         '+seta','v_height', '600',
         '+seta','g_showintromovie','0',
-        '+seta','g_nativeMouse','1'
+        '+seta','g_nativeMouse','1',
+        # Kill mouse input entirely so the user's hand on the mouse never
+        # rotates the view (client-side prediction otherwise tilts the
+        # camera before the server corrects back). Ultron aims via the
+        # server's delta_angles, so zero mouse sensitivity is the clean
+        # config for demo mode.
+        '+seta','sensitivity','0',
+        '+seta','m_pitch','0',
+        '+seta','m_yaw','0',
+        '+seta','m_side','0',
+        '+seta','m_forward','0',
+        '+seta','cl_mousesmooth','0',
+        '+seta','freelook','0'
     )
     # Also overwrite the persisted value directly, belt-and-suspenders, in
     # case the engine reads kexengine.cfg before the CLI queue executes.
