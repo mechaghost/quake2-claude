@@ -135,7 +135,8 @@ bool Ultron_IsHuman(edict_t *ent) {
 void Ultron_Bot_Init() {
     ultron_play_self       = gi.cvar("ultron_play_self",       "1",   CVAR_NOFLAGS);
     ultron_eval_seconds    = gi.cvar("ultron_eval_seconds",    "0",   CVAR_NOFLAGS);
-    ultron_bot_fire_cone   = gi.cvar("ultron_bot_fire_cone",   "8",   CVAR_NOFLAGS);
+    // 0 = per-weapon auto cone (recommended). Non-zero forces a global cone.
+    ultron_bot_fire_cone   = gi.cvar("ultron_bot_fire_cone",   "0",   CVAR_NOFLAGS);
     ultron_bot_move_speed  = gi.cvar("ultron_bot_move_speed",  "400", CVAR_NOFLAGS);
     ultron_bot_strafe_period = gi.cvar("ultron_bot_strafe_period", "500", CVAR_NOFLAGS);
     ultron_bot_backpedal_dist = gi.cvar("ultron_bot_backpedal_dist","200", CVAR_NOFLAGS);
@@ -255,6 +256,63 @@ static vec3_t AimAtPoint(edict_t *self, const vec3_t &point, float frametime_s) 
 }
 
 // ---------------------------------------------------------------------------
+// Weapon knowledge
+
+// Current weapon id, or IT_NULL if unarmed / switching.
+static item_id_t CurrentWeaponId(edict_t *self) {
+    if (!self->client->pers.weapon) return IT_NULL;
+    return self->client->pers.weapon->id;
+}
+
+// Fire cone (degrees) appropriate for the current weapon. Cone is how far
+// off-axis the aim can be before we decide to press attack. Too wide =
+// spray; too tight = we can't hit moving targets at all.
+static float WeaponFireCone(item_id_t id) {
+    switch (id) {
+        case IT_WEAPON_RAILGUN:      return 2.5f;   // hitscan precision
+        case IT_WEAPON_MACHINEGUN:
+        case IT_WEAPON_CHAINGUN:     return 5.0f;   // hitscan auto-fire
+        case IT_WEAPON_HYPERBLASTER:
+        case IT_WEAPON_IONRIPPER:    return 5.0f;
+        case IT_WEAPON_BLASTER:      return 6.0f;
+        case IT_WEAPON_RLAUNCHER:    return 4.0f;   // splash forgives some miss
+        case IT_WEAPON_GLAUNCHER:
+        case IT_WEAPON_PROXLAUNCHER: return 6.0f;   // arc compensation
+        case IT_WEAPON_SHOTGUN:
+        case IT_WEAPON_SSHOTGUN:     return 10.0f;  // spread forgives wide
+        case IT_WEAPON_BFG:          return 3.0f;
+        default:                     return 8.0f;
+    }
+}
+
+// Effective projectile speed (units/sec). 0 means hitscan — no lead.
+static float WeaponProjectileSpeed(item_id_t id) {
+    switch (id) {
+        case IT_WEAPON_BLASTER:      return 1000.0f;
+        case IT_WEAPON_HYPERBLASTER: return 1000.0f;
+        case IT_WEAPON_IONRIPPER:    return 800.0f;
+        case IT_WEAPON_RLAUNCHER:    return 650.0f;   // g_weapon.cpp:1295
+        case IT_WEAPON_GLAUNCHER:    return 600.0f;
+        case IT_WEAPON_BFG:          return 400.0f;
+        // hitscan / melee / unknown → no lead
+        default: return 0.0f;
+    }
+}
+
+// Predict where target will be after the projectile's time-of-flight, assuming
+// straight-line travel. Zero speed returns the raw origin (hitscan).
+static vec3_t LeadPoint(edict_t *shooter, edict_t *target, float proj_speed) {
+    vec3_t tp = EyePos(target);
+    if (proj_speed <= 0.0f) return tp;
+    vec3_t sp = EyePos(shooter);
+    float dist = (tp - sp).length();
+    float t    = dist / proj_speed;
+    // Cap lead to avoid wild overshoot on high-velocity targets or lag spikes.
+    t = std::clamp(t, 0.0f, 1.5f);
+    return tp + target->velocity * t;
+}
+
+// ---------------------------------------------------------------------------
 // Movement
 
 // Fill ucmd->forwardmove/sidemove to move toward goal_world from self, given
@@ -297,8 +355,9 @@ static void DriveMovement(edict_t *self, usercmd_t *ucmd, const vec3_t &goal_wor
 // ---------------------------------------------------------------------------
 // Fire
 
-// Returns true if self's current view forward is within ultron_bot_fire_cone
-// degrees of the direction to target_point.
+// Returns true if self's current view forward is within the weapon's fire
+// cone of the direction to target_point. The cone is per-weapon; the cvar
+// ultron_bot_fire_cone is a global override when > 0.
 static bool AimWithinCone(edict_t *self, const vec3_t &target_point) {
     vec3_t eye = EyePos(self);
     vec3_t to_target = (target_point - eye).normalized();
@@ -307,7 +366,9 @@ static bool AimWithinCone(edict_t *self, const vec3_t &target_point) {
     AngleVectors(self->client->v_angle, view_fwd, nullptr, nullptr);
 
     float dot = view_fwd.dot(to_target);
-    float cone_deg = CvarF(ultron_bot_fire_cone, DEFAULT_FIRE_CONE_DEG);
+    float override_deg = CvarF(ultron_bot_fire_cone, 0.0f);
+    float cone_deg = (override_deg > 0.0f) ? override_deg
+                                           : WeaponFireCone(CurrentWeaponId(self));
     float cos_thresh = cosf(cone_deg * PIf / 180.0f);
     return dot >= cos_thresh;
 }
@@ -386,6 +447,131 @@ static void DriveWander(edict_t *self, usercmd_t *ucmd, float frametime_s) {
 }
 
 // ---------------------------------------------------------------------------
+// State machine
+
+enum ultron_state_t {
+    UST_INTERMISSION,
+    UST_RESPAWN,
+    UST_SPECTATOR,
+    UST_COMBAT,    // visible enemy, fight
+    UST_HUNT,      // enemy in memory (last-seen), chase
+    UST_HEAL,      // low HP, break engagement (falls back to wander for now)
+    UST_LOOT,      // pursue known item (Phase 5 will flesh this out)
+    UST_WANDER     // explore, nothing known
+};
+
+static const char *StateName(ultron_state_t s) {
+    switch (s) {
+        case UST_INTERMISSION: return "intermission";
+        case UST_RESPAWN:      return "respawn";
+        case UST_SPECTATOR:    return "spectator";
+        case UST_COMBAT:       return "combat";
+        case UST_HUNT:         return "hunt";
+        case UST_HEAL:         return "heal";
+        case UST_LOOT:         return "loot";
+        case UST_WANDER:       return "wander";
+    }
+    return "?";
+}
+
+static ultron_state_t DecideState(edict_t *self, edict_t *visible_enemy, bool have_memory) {
+    if (level.intermissiontime != 0_ms)      return UST_INTERMISSION;
+    if (self->deadflag || self->client->awaiting_respawn) return UST_RESPAWN;
+    if (self->client->resp.spectator)        return UST_SPECTATOR;
+
+    if (visible_enemy) {
+        // Low-HP retreat is enabled when we have an enemy that can't be
+        // quickly killed. Tuning: simple health threshold for now.
+        if (self->health <= 30) return UST_HEAL;
+        return UST_COMBAT;
+    }
+    if (have_memory) return UST_HUNT;
+    // Future: UST_LOOT when we know of a high-value nearby item (Phase 5).
+    return UST_WANDER;
+}
+
+// Damage-direction aim bias. Populated when we take new damage this frame.
+static int32_t g_last_health = 100;
+static vec3_t  g_damage_from = {};
+static gtime_t g_damage_at   = 0_ms;
+
+static void UpdateDamageSense(edict_t *self) {
+    if (self->health < g_last_health && self->health > 0) {
+        g_damage_from = self->client->damage_from;
+        g_damage_at   = level.time;
+    }
+    g_last_health = self->health;
+}
+
+// Combat state: aim at target (with projectile lead), fire through the
+// weapon-specific cone, strafe-dodge, and walk toward the target.
+static void State_Combat(edict_t *self, usercmd_t *ucmd, edict_t *target, float frametime_s) {
+    g_target_ticks++;
+    g_wander_yaw_until = 0_ms;   // drop any stale wander plan
+
+    // Projectile lead if our current weapon is not hitscan.
+    float proj_speed = WeaponProjectileSpeed(CurrentWeaponId(self));
+    vec3_t aim_point = LeadPoint(self, target, proj_speed);
+
+    vec3_t desired = AimAtPoint(self, aim_point, frametime_s);
+    DriveMovement(self, ucmd, aim_point, desired[YAW]);
+
+    if (AimWithinCone(self, aim_point) && !CvarI(ultron_bot_no_fire, 0)) {
+        ucmd->buttons |= BUTTON_ATTACK;
+        g_fire_ticks++;
+    }
+}
+
+// Hunt state: no visible enemy, but we have a last-seen location. Walk
+// toward it. Don't fire — no confirmed target.
+static void State_Hunt(edict_t *self, usercmd_t *ucmd, float frametime_s) {
+    vec3_t aim_point = g_mem.last_seen;
+    vec3_t desired   = AimAtPoint(self, aim_point, frametime_s);
+    DriveMovement(self, ucmd, aim_point, desired[YAW]);
+}
+
+// Heal state: low HP, break line with enemy, find space. Phase 5 wires this
+// to known health items. For now: back away from last-seen direction with
+// strafe-jink, to look less like a sitting target.
+static void State_Heal(edict_t *self, usercmd_t *ucmd, float frametime_s) {
+    // If we have a threat direction, run directly away from it.
+    if (g_damage_at != 0_ms && (level.time - g_damage_at).seconds<float>() < 3.0f) {
+        vec3_t away = (self->s.origin - g_damage_from);
+        away[2] = 0.0f;
+        if (away.length() > 1.0f) {
+            away.normalize();
+            float target_yaw = vectoangles(away)[YAW];
+            AimSmooth(self, target_yaw, 0.0f, frametime_s);
+            float speed = CvarF(ultron_bot_move_speed, DEFAULT_MOVE_SPEED);
+            ucmd->forwardmove = speed;
+            ucmd->sidemove    = (frandom() < 0.5f) ? -speed : speed;
+            return;
+        }
+    }
+    // Fallback: just wander, but faster turnover to find a corner.
+    DriveWander(self, ucmd, frametime_s);
+}
+
+// Loot state: placeholder that falls back to wander until Phase 5 implements
+// item awareness + reachable-item selection.
+static void State_Loot(edict_t *self, usercmd_t *ucmd, float frametime_s) {
+    DriveWander(self, ucmd, frametime_s);
+}
+
+// Respawn / intermission button pulsers, extracted so dispatcher stays clean.
+static void State_Intermission(edict_t *self, usercmd_t *ucmd) {
+    if ((level.time - level.intermissiontime) > 5_sec
+        && ((level.time.milliseconds() / 200) % 30) == 0)
+    {
+        ucmd->buttons |= BUTTON_ATTACK;
+    }
+}
+static void State_Respawn(edict_t *self, usercmd_t *ucmd) {
+    if ((level.time.milliseconds() / 200) % 5 == 0)
+        ucmd->buttons |= BUTTON_ATTACK;
+}
+
+// ---------------------------------------------------------------------------
 // Top-level
 
 void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
@@ -428,30 +614,8 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
         }
     }
 
-    // Non-combat states: emit a pulsed BUTTON_ATTACK on a cadence so the user
-    // never has to touch the keyboard. Returns after — no perception/aim/fire
-    // logic should run in these states.
-    if (level.intermissiontime != 0_ms)
-    {
-        // Intermission skip: any button after intermission_time + 5s.
-        if ((level.time - level.intermissiontime) > 5_sec
-            && ((level.time.milliseconds() / 200) % 30) == 0)   // ~1 pulse every 6s
-        {
-            ucmd->buttons |= BUTTON_ATTACK;
-        }
-        return;
-    }
-    if (self->client->awaiting_respawn || self->deadflag)
-    {
-        // Respawn: short pulse once a second.
-        if ((level.time.milliseconds() / 200) % 5 == 0)
-            ucmd->buttons |= BUTTON_ATTACK;
-        return;
-    }
-    if (self->client->resp.spectator)
-    {
-        return;
-    }
+    // Refresh damage-sense before any state handler runs so HEAL can use it.
+    UpdateDamageSense(self);
 
     // Perception: nearest visible enemy, with configurable last-seen memory.
     const gtime_t memory_window = gtime_t::from_ms((int64_t)CvarI(ultron_bot_memory_ms, 2000));
@@ -463,59 +627,37 @@ void Ultron_Bot_Command(edict_t *self, usercmd_t *ucmd) {
     } else if (g_mem.target && (level.time - g_mem.last_seen_at) > memory_window) {
         g_mem.target = nullptr;
     }
+    bool have_memory = (g_mem.target != nullptr);
 
-    edict_t *target = vis;
-    vec3_t   aim_point;
-    bool     have_aim = false;
+    ultron_state_t state = DecideState(self, vis, have_memory);
 
-    if (target) {
-        aim_point = EyePos(target);
-        have_aim = true;
-    } else if (g_mem.target) {
-        // Aim at last-seen position as a best-effort orientation hint.
-        aim_point = g_mem.last_seen;
-        have_aim = true;
+    switch (state) {
+        case UST_INTERMISSION: State_Intermission(self, ucmd); return;
+        case UST_RESPAWN:      State_Respawn(self, ucmd);      return;
+        case UST_SPECTATOR:                                    return;
+        case UST_COMBAT:       State_Combat(self, ucmd, vis, frametime_s); break;
+        case UST_HUNT:         State_Hunt(self, ucmd, frametime_s);         break;
+        case UST_HEAL:         State_Heal(self, ucmd, frametime_s);         break;
+        case UST_LOOT:         State_Loot(self, ucmd, frametime_s);         break;
+        case UST_WANDER:
+            g_nothing_ticks++;
+            if (CvarI(ultron_bot_wander, 1))
+                DriveWander(self, ucmd, frametime_s);
+            break;
     }
 
-    if (!have_aim) {
-        g_nothing_ticks++;
-        // No target, no memory — wander the map (was: stand still). Gated on
-        // ultron_bot_wander so a tuning pass can disable for A/B.
-        if (CvarI(ultron_bot_wander, 1)) {
-            DriveWander(self, ucmd, frametime_s);
-        }
-        return;
-    }
-    // Fresh visible target invalidates the wander plan; next time we lose
-    // sight we want a fresh random yaw, not the stale one from last wander.
-    g_wander_yaw_until = 0_ms;
-    g_stuck_since      = 0_ms;
-    if (target) g_target_ticks++;
-
-    vec3_t desired = AimAtPoint(self, aim_point, frametime_s);
-
-    // Walk toward visible target; if only remembered, also walk toward last-seen.
-    DriveMovement(self, ucmd, aim_point, desired[YAW]);
-
-    // Fire only when we actually see the target AND our view is near it.
-    bool want_fire = target && AimWithinCone(self, aim_point);
-    if (want_fire && !CvarI(ultron_bot_no_fire, 0)) {
-        ucmd->buttons |= BUTTON_ATTACK;
-        g_fire_ticks++;
-    }
-
-    // Verbose per-frame dev log, when enabled. Rate-limit to ~4 Hz.
+    // Verbose per-frame dev log. Rate-limit to ~4 Hz.
     if (CvarI(ultron_bot_debug, 0))
     {
         static gtime_t last_dbg = 0_ms;
         if ((level.time - last_dbg).milliseconds() >= 250)
         {
             last_dbg = level.time;
-            vec3_t dir = aim_point - EyePos(self);
-            float dist = dir.length();
-            gi.Com_PrintFmt("[ultron/dbg] tgt={} vis={} dist={:.0f} fwd={:.2f} side={:.2f} fire={}\n",
-                target ? target->s.number : -1, vis ? 1 : 0,
-                dist, ucmd->forwardmove, ucmd->sidemove, want_fire ? 1 : 0);
+            gi.Com_PrintFmt("[ultron/dbg] state={} hp={} wpn={} fwd={:.0f} side={:.0f} fire={}\n",
+                StateName(state), self->health,
+                self->client->pers.weapon ? (int)self->client->pers.weapon->id : -1,
+                ucmd->forwardmove, ucmd->sidemove,
+                (ucmd->buttons & BUTTON_ATTACK) ? 1 : 0);
         }
     }
 }
