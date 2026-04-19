@@ -114,13 +114,17 @@ if (-not $Fullscreen) {
     # Kex uses v_* cvars for video. v_windowmode: 0=windowed, 1=fullscreen
     # (confirmed by reading the user's kexengine.cfg). Small dev window so
     # the mouse is free and we can see the console / editor alongside.
+    # g_nativeMouse=1 switches to the OS cursor so it's not captured by the
+    # engine in windowed mode. in_nograb=1 is a Quake-convention fallback in
+    # case the build honors it. The bot drives the view via delta_angles so
+    # we don't need mouse input at all.
     $launchArgs += @(
         '+set','v_windowmode','0',
         '+set','v_width',  '800',
         '+set','v_height', '600',
-        # Also kill the intro movie properly (this cvar is observed in the
-        # engine's saved config, so it's a real one).
-        '+set','g_showintromovie','0'
+        '+set','g_showintromovie','0',
+        '+set','g_nativeMouse','1',
+        '+set','in_nograb','1'
     )
 }
 if ($EvalSeconds -gt 0) {
